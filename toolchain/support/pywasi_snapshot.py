@@ -42,6 +42,10 @@ def resume(argv, env):
         sys.argv = ["-m", *args[2:]]
         sys.path.insert(0, "")
         runpy._run_module_as_main(args[1])
+    elif not args and sys.stdin.isatty():
+        sys.argv = [""]
+        sys.path.insert(0, "")
+        interact(main)
     elif not args or args[0] == "-":
         sys.argv = ["-", *args[1:]] if args else [""]
         sys.path.insert(0, "")
@@ -55,3 +59,12 @@ def resume(argv, env):
         sys.argv = list(args)
         sys.path.insert(0, os.path.dirname(os.path.abspath(args[0])))
         runpy.run_path(args[0], run_name="__main__")
+
+
+def interact(main):
+    """The interactive prompt, as python starts it on a terminal. CPython's
+    own REPL needs termios, which WASI lacks, so this is the basic one."""
+    import code
+
+    banner = f"Python {sys.version} on {sys.platform}\n" 'Type "help", "copyright", "credits" or "license" for more information.'
+    code.interact(banner=banner, local=main.__dict__, exitmsg="")
