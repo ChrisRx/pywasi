@@ -1,0 +1,16 @@
+[project]
+name = "numpy-app"
+version = "0.1.0"
+description = "Example app for the pywasi uv lockfile build"
+requires-python = ">=3.14"
+dependencies = [
+    "numpy==2.5.4",
+    # C speedups built from sdist with setuptools.
+    "markupsafe",
+    # Pure Python, installed from a py3-none-any wheel.
+    "tabulate",
+]
+
+[tool.pywasi]
+# Imported once at build time and snapshotted into python.wasm (Wizer).
+preload = ["numpy", "markupsafe", "tabulate"]

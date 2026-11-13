@@ -1,0 +1,110 @@
+#!/usr/bin/env bash
+# Compiler driver for building Python extension modules for wasm32-wasip1.
+#
+# Compiles and ordinary links go straight to wasi-sdk clang. Links with
+# -shared (how build systems produce extension modules) instead produce a
+# relocatable wasm object with `wasm-ld -r`, since WASI has no dlopen. The
+# object keeps the extension's file name (e.g. foo.cpython-314-wasm32-wasi.so)
+# and is linked into python.wasm later by toolchain/pywasi_build.py. Static
+# archives on the link line are resolved into the object, a uniquely named
+# pywasi_init_* entry point is added, and every other symbol is made local
+# (toolchain/wasm-localize.py), so each extension is self-contained like a
+# shared library would be.
+set -euo pipefail
+
+: "${WASI_SDK_PATH:?run inside nix develop}"
+# SIMD128 is supported by wasmtime and wazero; lets clang vectorize loops.
+target=(--target=wasm32-wasip1 --sysroot="$WASI_SDK_PATH/share/wasi-sysroot" -msimd128)
+case "$(basename "$0")" in
+  *++)
+    driver="$WASI_SDK_PATH/bin/clang++"
+    # Compile C++ try/throw without the wasm exception-handling proposal,
+    # which wazero doesn't support. A throw aborts (toolchain/support/
+    # cxa_abort.c); code that relies on catching exceptions won't work.
+    target+=(-fignore-exceptions)
+    ;;
+  *) driver="$WASI_SDK_PATH/bin/clang" ;;
+esac
+
+shared=0
+for a in "$@"; do
+  [ "$a" = "-shared" ] && shared=1 && break
+done
+if [ "$shared" = 0 ]; then
+  exec "$driver" "${target[@]}" "$@"
+fi
+
+out=""
+libdirs=()
+libs=()
+objs=()
+srcs=()
+archives=()
+cflags=()
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -o) out="$2"; shift ;;
+    -o*) out="${1#-o}" ;;
+    -shared | -Wl,*) ;;
+    -L) libdirs+=("$2"); shift ;;
+    -L*) libdirs+=("${1#-L}") ;;
+    -l) libs+=("$2"); shift ;;
+    -l*) libs+=("${1#-l}") ;;
+    *.o | *.obj) objs+=("$1") ;;
+    *.a) archives+=("$1") ;;
+    *.c | *.cc | *.cpp | *.cxx) srcs+=("$1") ;;
+    *) cflags+=("$1") ;;
+  esac
+  shift
+done
+[ -n "$out" ] || { echo "wasi-cc: -shared link without -o" >&2; exit 1; }
+
+# -lfoo found as a static libfoo.a in a -L dir (e.g. PYWASI_SYSROOT/lib) is
+# linked into the extension. Anything else (-lm, ...) is left for the final
+# link against wasi-libc.
+for l in "${libs[@]}"; do
+  for d in "${libdirs[@]}"; do
+    if [ -f "$d/lib$l.a" ]; then
+      archives+=("$d/lib$l.a")
+      break
+    fi
+  done
+done
+
+tmp="$(mktemp -d)"
+trap 'rm -rf "$tmp"' EXIT
+
+# Some callers (e.g. meson's sanity checks) compile and link in one step.
+for i in "${!srcs[@]}"; do
+  "$driver" "${target[@]}" "${cflags[@]}" -c "${srcs[$i]}" -o "$tmp/$i.o"
+  objs+=("$tmp/$i.o")
+done
+
+# Give the module a unique exported entry point that calls its
+# PyInit_<leaf>, where <leaf> is the file name up to the first dot
+# (foo.cpython-314-wasm32-wasi.so -> foo). Unrelated packages often reuse
+# extension names (`_speedups`), so PyInit_<leaf> itself becomes local and
+# the final link registers the module through this symbol instead.
+leaf="$(basename "$out")"
+leaf="${leaf%%.*}"
+entry="pywasi_init_$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')"
+printf 'extern void *PyInit_%s(void);\nvoid *%s(void) { return PyInit_%s(); }\n' \
+  "$leaf" "$entry" "$leaf" >"$tmp/entry.c"
+"$WASI_SDK_PATH/bin/clang" --target=wasm32-wasip1 --sysroot="$WASI_SDK_PATH/share/wasi-sysroot" -c "$tmp/entry.c" -o "$tmp/entry.o"
+
+# A function signature mismatch means wasm-ld replaced calls with a trap
+# (typically C code declaring a Fortran routine with a different return
+# type). Fail here rather than at runtime.
+if ! "$WASI_SDK_PATH/bin/wasm-ld" -r -o "$out" "${objs[@]}" "$tmp/entry.o" "${archives[@]}" 2>"$tmp/ld.err"; then
+  cat "$tmp/ld.err" >&2
+  exit 1
+fi
+cat "$tmp/ld.err" >&2
+if grep -q 'signature mismatch' "$tmp/ld.err"; then
+  echo "wasi-cc: function signature mismatch in $out (calls would trap at runtime)" >&2
+  exit 1
+fi
+
+# Only the entry point stays global, like a shared library's export list,
+# so private copies of helper code in different extensions don't collide.
+python3 "$(dirname "$(realpath "$0")")/wasm-localize.py" "$out" --keep "^${entry}\$"

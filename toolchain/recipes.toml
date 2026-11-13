@@ -1,0 +1,39 @@
+# Per-package build settings for wasm32-wasip1, keyed by normalized
+# project name. A project can add or override entries under
+# [tool.pywasi.packages.<name>] in its own pyproject.toml.
+#
+# Keys:
+#   config-settings     PEP 517 config settings passed to the build backend
+#                       (a list value repeats the key).
+#   build-requires      Extra build-machine packages to install.
+#   exclude-extensions  Regex of dotted extension module names to leave out
+#                       of python.wasm (e.g. test-only modules).
+#   env                 Extra environment variables for the build.
+#   patches             Files in toolchain/patches applied to the sdist
+#                       (patch -p1) before building.
+
+[numpy]
+config-settings.setup-args = [
+    # OpenBLAS from nix/c-libs.nix; fail rather than fall back to the
+    # unoptimized built-in routines.
+    "-Dblas=openblas",
+    "-Dlapack=openblas",
+    "-Dallow-noblas=false",
+    # No pthreads in wasip1.
+    "-Ddisable-threading=true",
+    # numpy's SIMD dispatch has no wasm targets. Loops are still vectorized
+    # by clang (-msimd128 from toolchain/wasi-cc).
+    "-Ddisable-optimization=true",
+    "-Dcpu-baseline=none",
+    "-Dcpu-dispatch=none",
+    "-Ddisable-svml=true",
+    "-Ddisable-highway=true",
+    "-Ddisable-intel-sort=true",
+]
+patches = ["numpy-xerbla-length.patch", "numpy-wasm-fpstatus.patch"]
+exclude-extensions = '^numpy\._core\.(_[a-z_]+_tests|_simd)$'
+
+[pyyaml]
+# Fail instead of silently falling back to pure Python if libyaml (from
+# nix/c-libs.nix) can't be compiled against.
+env.PYYAML_FORCE_LIBYAML = "1"

@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+# Run the WASI python.wasm as if it were a host interpreter, for build
+# tools (meson's python introspection, code generators). The host root is
+# mounted at the guest root so absolute paths mean the same thing on both
+# sides, and sys.prefix points at dist/python so sysconfig reports the
+# wasm headers and install layout. PYTHONPATH is inherited (build tools set
+# it for code generators) minus /nix/store entries, which are native
+# packages from the dev shell.
+set -euo pipefail
+root="$(cd "$(dirname "$0")/.." && pwd)"
+dist="${PYWASI_PYTHON_DIST:-$root/dist/python}"
+
+# Forward build-tool variables (meson install scripts read MESON_*).
+pythonpath="$root/toolchain/site"
+IFS=: read -ra entries <<<"${PYTHONPATH:-}"
+for p in "${entries[@]}"; do
+  case "$p" in
+    "" | /nix/store/*) ;;
+    *) pythonpath+=":$p" ;;
+  esac
+done
+
+passthru=()
+for name in ${!MESON_@} DESTDIR SOURCE_DATE_EPOCH; do
+  [ -n "${!name+x}" ] && passthru+=(--env "$name")
+done
+
+exec wasmtime run \
+  --wasm max-wasm-stack=16777216 \
+  --dir /::/ \
+  --env PYTHONHOME="$dist" \
+  --env PYTHONPATH="$pythonpath" \
+  --env PYWASI_CWD="$PWD" \
+  --argv0 "$0" \
+  "${passthru[@]}" \
+  "$dist/bin/python.wasm" "$@"

@@ -1,0 +1,48 @@
+numpy: give xerbla_ the hidden Fortran string length argument.
+
+LAPACK passes (name, info, len). numpy's override takes two arguments, which
+is fine natively but is a signature mismatch in wasm, where calling it traps.
+Used by toolchain/recipes.toml.
+
+--- a/numpy/linalg/lapack_lite/python_xerbla.c
++++ b/numpy/linalg/lapack_lite/python_xerbla.c
+@@ -21,7 +21,7 @@
+   info: Number of the invalid parameter.
+ */
+ 
+-CBLAS_INT BLAS_FUNC(xerbla)(char *srname, CBLAS_INT *info)
++CBLAS_INT BLAS_FUNC(xerbla)(char *srname, CBLAS_INT *info, CBLAS_INT srname_len)
+ {
+         static const char format[] = "On entry to %.*s" \
+                 " parameter number %d had an illegal value";
+--- a/numpy/linalg/lapack_litemodule.c
++++ b/numpy/linalg/lapack_litemodule.c
+@@ -66,7 +66,7 @@
+                           fortran_int *lda, f2c_doublecomplex tau[],
+                           f2c_doublecomplex work[], fortran_int *lwork, fortran_int *info);
+ 
+-extern fortran_int FNAME(xerbla)(char *srname, fortran_int *info);
++extern fortran_int FNAME(xerbla)(char *srname, fortran_int *info, fortran_int srname_len);
+ 
+ static PyObject *LapackError;
+ 
+@@ -354,7 +354,7 @@
+ 
+     NPY_BEGIN_THREADS_DEF;
+     NPY_BEGIN_THREADS;
+-    FNAME(xerbla)("test", &info);
++    FNAME(xerbla)("test", &info, 4);
+     NPY_END_THREADS;
+ 
+     if (PyErr_Occurred()) {
+--- a/numpy/_core/src/common/python_xerbla.c
++++ b/numpy/_core/src/common/python_xerbla.c
+@@ -21,7 +21,7 @@
+   info: Number of the invalid parameter.
+ */
+ 
+-CBLAS_INT BLAS_FUNC(xerbla)(char *srname, CBLAS_INT *info)
++CBLAS_INT BLAS_FUNC(xerbla)(char *srname, CBLAS_INT *info, CBLAS_INT srname_len)
+ {
+         static const char format[] = "On entry to %.*s" \
+                 " parameter number %d had an illegal value";

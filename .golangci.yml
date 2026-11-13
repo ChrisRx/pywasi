@@ -1,0 +1,18 @@
+version: "2"
+
+linters:
+  settings:
+    errcheck:
+      # Close, Remove and RemoveAll are only deferred or called on read and
+      # cleanup paths, where there is nothing useful to do with their
+      # errors. Closes after writes are checked explicitly.
+      exclude-functions:
+        - os.Remove
+        - os.RemoveAll
+        - (io.Closer).Close
+        - (io.ReadCloser).Close
+        - (*os.File).Close
+        - (*archive/zip.ReadCloser).Close
+        - (*go.chrisrx.dev/pywasi.Python).Close
+        - (github.com/tetratelabs/wazero.Runtime).Close
+        - (github.com/tetratelabs/wazero/api.Module).Close

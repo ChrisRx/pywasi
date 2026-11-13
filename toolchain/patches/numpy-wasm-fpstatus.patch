@@ -1,0 +1,67 @@
+numpy: software floating-point status flags on wasm.
+
+wasm has no FP exception flags, so numpy never sees the status it raises
+explicitly (singular matrices in linalg, integer division by zero) and
+returns NaN without raising. Keep the flags in a software word shared
+through toolchain/support/numpy_fpstatus.c. Used by toolchain/recipes.toml.
+
+--- a/numpy/_core/src/npymath/ieee754.c.src
++++ b/numpy/_core/src/npymath/ieee754.c.src
+@@ -354,6 +354,51 @@
+ #endif
+ 
+ 
++#if defined(__wasm__)
++/*
++ * pywasi: wasm has no floating-point exception flags, so fetestexcept always
++ * reports nothing and numpy silently loses the status it sets explicitly
++ * (linalg errors, integer division by zero). Keep a software status word
++ * instead. It is defined once in python.wasm (toolchain/support) because
++ * each extension module links its own private copy of npymath.
++ */
++extern int __pywasi_npy_fpstatus;
++
++int npy_get_floatstatus_barrier(char* param)
++{
++    if (param != NULL) {
++        volatile char NPY_UNUSED(c) = *(char*)param;
++    }
++    return __pywasi_npy_fpstatus;
++}
++
++int npy_clear_floatstatus_barrier(char * param)
++{
++    int fpstatus = npy_get_floatstatus_barrier(param);
++    __pywasi_npy_fpstatus = 0;
++    return fpstatus;
++}
++
++void npy_set_floatstatus_divbyzero(void)
++{
++    __pywasi_npy_fpstatus |= NPY_FPE_DIVIDEBYZERO;
++}
++
++void npy_set_floatstatus_overflow(void)
++{
++    __pywasi_npy_fpstatus |= NPY_FPE_OVERFLOW;
++}
++
++void npy_set_floatstatus_underflow(void)
++{
++    __pywasi_npy_fpstatus |= NPY_FPE_UNDERFLOW;
++}
++
++void npy_set_floatstatus_invalid(void)
++{
++    __pywasi_npy_fpstatus |= NPY_FPE_INVALID;
++}
++#else
+ int npy_get_floatstatus_barrier(char* param)
+ {
+     int fpstatus = fetestexcept(FE_DIVBYZERO | FE_OVERFLOW |
+@@ -403,4 +448,5 @@
+ {
+     feraiseexcept(FE_INVALID);
+ }
++#endif
+ 

@@ -1,0 +1,8 @@
+build/
+dist/
+result
+result-*
+.pywasi/
+.venv/
+__pycache__/
+*.test

@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+# pkg-config for wasm32-wasip1 builds: only sees the WASI Python install and
+# the WASI C libraries in PYWASI_SYSROOT. --define-prefix derives each
+# package's prefix from where its .pc file lives, which rebases Python's
+# prefix=/ onto dist/python.
+set -euo pipefail
+root="$(cd "$(dirname "$0")/.." && pwd)"
+dist="${PYWASI_PYTHON_DIST:-$root/dist/python}"
+export PKG_CONFIG_LIBDIR="$dist/lib/pkgconfig${PYWASI_SYSROOT:+:$PYWASI_SYSROOT/lib/pkgconfig}"
+unset PKG_CONFIG_PATH PKG_CONFIG_SYSROOT_DIR
+exec pkg-config --define-prefix "$@"
