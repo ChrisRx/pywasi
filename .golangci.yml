@@ -14,5 +14,7 @@ linters:
         - (*os.File).Close
         - (*archive/zip.ReadCloser).Close
         - (*go.chrisrx.dev/pywasi.Python).Close
+        - (*go.chrisrx.dev/pywasi.Session).Close
+        - (*io.PipeWriter).Close
         - (github.com/tetratelabs/wazero.Runtime).Close
         - (github.com/tetratelabs/wazero/api.Module).Close

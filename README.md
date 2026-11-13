@@ -277,6 +277,32 @@ The request and response go through a temporary directory mounted at
 about 25-30ms with a startup snapshot (numpy preloaded), and 60-150ms
 without one, depending on imports.
 
+## Sessions
+
+Each `Eval` and `Call` is a fresh interpreter, which keeps calls isolated
+but costs startup every time. A `Session` is one interpreter that stays
+running and handles requests in turn, keeping imports and globals between
+them, like a notebook kernel:
+
+```go
+s, err := py.Session(ctx, pywasi.RunOptions{Stdout: os.Stdout})
+if err != nil {
+	log.Fatal(err)
+}
+defer s.Close()
+
+_, err = s.Eval[any](ctx, "import numpy as np\nm = np.eye(3) * 2")
+det, err := s.Eval[float64](ctx, "float(np.linalg.det(m))")             // m is still defined
+n, err := s.Call[int](ctx, pywasi.Func{Module: "counter", Name: "bump"}) // module state persists
+```
+
+A numpy `Eval` takes about 2ms in a session, against about 30ms for a
+fresh interpreter with a snapshot and about 150ms without one. Requests on
+one session run one at a time (it's safe to share between goroutines), so
+use several sessions for parallel work. A Python error, even `SystemExit`,
+is returned and the session keeps going. Code can't be interrupted, so a
+request whose context is canceled closes the session.
+
 ## Fast startup
 
 The build pre-initializes the interpreter with Wizer: CPython starts, the

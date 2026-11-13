@@ -122,6 +122,10 @@ func (p *Python) Call[T any](ctx context.Context, fn Func, opts ...RunOptions) (
 		var zero T
 		return zero, errors.New("pywasi: Func.Module and Func.Name are required")
 	}
+	return invoke[T](ctx, p, callRequest(fn), opts)
+}
+
+func callRequest(fn Func) request {
 	args := fn.Args
 	if args == nil {
 		args = []any{}
@@ -130,7 +134,7 @@ func (p *Python) Call[T any](ctx context.Context, fn Func, opts ...RunOptions) (
 	if kwargs == nil {
 		kwargs = map[string]any{}
 	}
-	return invoke[T](ctx, p, request{Mode: "call", Module: fn.Module, Name: fn.Name, Args: args, Kwargs: kwargs}, opts)
+	return request{Mode: "call", Module: fn.Module, Name: fn.Name, Args: args, Kwargs: kwargs}
 }
 
 // ioGuest is where the per-call request/response directory is mounted.
@@ -216,6 +220,12 @@ func (p *Python) runModule(ctx context.Context, module string, req, out any, o R
 		}
 		return err
 	}
+	return decodeResponse(data, out)
+}
+
+// decodeResponse decodes {"ok": true, "value": ...} into out, or returns
+// the *Error of {"ok": false, "error": ...}.
+func decodeResponse(data []byte, out any) error {
 	var resp response
 	if err := json.Unmarshal(data, &resp); err != nil {
 		return fmt.Errorf("pywasi: decoding response: %w", err)
