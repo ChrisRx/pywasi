@@ -193,8 +193,8 @@ The resolver treats catalog bundles as installable versions, so numpy
 resolves to a bundle and tabulate to a wheel. New then downloads what's
 missing (all checked by sha256), links, and caches the interpreter by its
 inputs. The first time takes about 20s (downloads, compiling the linker,
-linking). After that `New` takes about 0.2s and an `Eval` using numpy about
-0.15s. Linked interpreters don't have a startup snapshot yet.
+linking). After that `New` takes about 0.25s and an `Eval` using numpy about
+0.15-0.2s. Linked interpreters don't have a startup snapshot yet.
 
 To publish more:
 
@@ -274,8 +274,8 @@ They stay in memory and are mounted read-only under `/.pywasi/modules` on
 The request and response go through a temporary directory mounted at
 `/.pywasi/io`, so the code's own `print`s still go to `RunOptions.Stdout`, and
 `python.wasm` stays a plain WASI program. Each call is a fresh interpreter:
-about 25-30ms with a startup snapshot (numpy preloaded), and 60-150ms
-without one, depending on imports.
+about 20ms with a startup snapshot (40ms with numpy preloaded), and
+60-200ms without one, depending on imports.
 
 ## Sessions
 
@@ -296,8 +296,8 @@ det, err := s.Eval[float64](ctx, "float(np.linalg.det(m))")             // m is 
 n, err := s.Call[int](ctx, pywasi.Func{Module: "counter", Name: "bump"}) // module state persists
 ```
 
-A numpy `Eval` takes about 2ms in a session, against about 30ms for a
-fresh interpreter with a snapshot and about 150ms without one. Requests on
+A small numpy `Eval` takes about 0.3ms in a session, against about 40ms
+for a fresh interpreter with a snapshot and 150-200ms without one. Requests on
 one session run one at a time (it's safe to share between goroutines), so
 use several sessions for parallel work. A Python error, even `SystemExit`,
 is returned and the session keeps going. Code can't be interrupted, so a
@@ -314,8 +314,9 @@ modules listed in `preload` are imported, and that memory is snapshotted into
 preload = ["numpy"]
 ```
 
-For the example app under wazero, this takes a run from 1.2s to 0.3s as a
-new process, and an `Eval` using numpy from about 150ms to 30ms. The
+For the example app, this takes an `Eval` using numpy from 150-200ms to
+about 40ms. Run as a new process with the wazero CLI, it saves less (0.45s
+to 0.3s), since loading the compiled module dominates. The
 snapshot interpreter accepts `-c`, `-m`, a script, or `-` (no other flags),
 and its string hash seed is fixed at build time. Set `snapshot = false` or
 pass `--no-snapshot` to turn it off.
@@ -358,16 +359,17 @@ See `toolchain/recipes.toml` for the built-in ones.
 ## Performance
 
 Everything is compiled with wasm SIMD128, and numpy uses OpenBLAS (its
-`WASM128_GENERIC` SIMD kernels, plus LAPACK) from `nix/c-libs.nix`. Versus
-native CPython 3.14 with numpy and OpenBLAS on x86-64, one thread:
+`WASM128_GENERIC` SIMD kernels, a register-blocked DGEMM kernel, plus LAPACK)
+from `nix/openblas-wasi.nix`. Versus native CPython 3.14 with numpy 2.5.4 and
+OpenBLAS on x86-64, one thread (`OMP_NUM_THREADS=1`), best of 3 runs:
 
 | | wasmtime | wazero (Go) |
 |---|---|---|
-| Pure Python | ~1.5-2x slower | ~3-5x slower |
-| numpy elementwise, reductions, FFT | ~1-1.5x | ~2-3x |
-| `linalg.solve` 1000x1000 | ~3.5x | ~9x |
-| matmul 1000x1000 | ~12x | ~37x |
-| `np.sort` | ~11x | ~25x |
+| Pure Python | ~1.5-2x slower | ~2-4.5x slower |
+| numpy elementwise, reductions, FFT | ~1-2x | ~1.5-3x |
+| `linalg.solve` 1000x1000 | ~2.5x | ~6.5x |
+| matmul 1000x1000 | ~3x | ~8x |
+| `np.sort` | ~10x | ~15x |
 
 Native numpy uses AVX2/AVX-512 kernels for matmul and sort, and wasm SIMD is
 128 bits wide.

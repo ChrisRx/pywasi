@@ -3,6 +3,7 @@ package pywasi_test
 import (
 	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -69,7 +70,16 @@ func TestPackagesPylock(t *testing.T) {
 
 func TestPackagesUV(t *testing.T) {
 	t.Setenv("PYWASI_CACHE", t.TempDir())
-	t.Setenv("PATH", "") // Use the pinned uv download.
+	// Use the pinned uv download: hide uv but keep python3, which uv locks
+	// with. Without one, uv downloads its own, unless that's disabled
+	// (UV_PYTHON_DOWNLOADS=never, as in the Nix dev shell).
+	bin := t.TempDir()
+	if python, err := exec.LookPath("python3"); err == nil {
+		if err := os.Symlink(python, filepath.Join(bin, "python3")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("PATH", bin)
 	py, err := stdlibPython(t, pywasi.WithPackages("rich", "tabulate"), pywasi.WithResolver(pywasi.ResolverUV))
 	if err != nil {
 		t.Fatal(err)
