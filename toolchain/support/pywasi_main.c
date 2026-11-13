@@ -21,6 +21,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 #include <wasi/libc-environ.h>
 #include <wasi/libc.h>
 
@@ -118,6 +119,21 @@ __attribute__((export_name("wizer-initialize"))) void pywasi_initialize(void) {
     }
 }
 
+/* Changes to the working directory in $PYWASI_CWD, if set, and removes it
+ * from the environment. WASI has no inherited working directory, so the host
+ * passes one this way (pywasi.RunOptions.Dir). */
+static void enter_working_directory(void) {
+    const char *dir = getenv("PYWASI_CWD");
+    if (!dir) {
+        return;
+    }
+    if (*dir && chdir(dir) != 0) {
+        fprintf(stderr, "pywasi: can't change to working directory %s\n", dir);
+        exit(1);
+    }
+    unsetenv("PYWASI_CWD");
+}
+
 extern void __wasm_call_dtors(void);
 
 /* Same as wasi-libc's _start, minus constructors (they ran before the
@@ -136,6 +152,7 @@ int main(int argc, char **argv) {
         if (register_builtins() < 0) {
             return 1;
         }
+        enter_working_directory();
         preinitialize(argc, argv);
         return Py_BytesMain(argc, argv);
     }
@@ -145,6 +162,7 @@ int main(int argc, char **argv) {
     __wasilibc_reset_preopens();
     __wasilibc_deinitialize_environ();
     __wasilibc_ensure_environ();
+    enter_working_directory();
 
     PyObject *args = PyList_New(0);
     PyObject *env = PyDict_New();

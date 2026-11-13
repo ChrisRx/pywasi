@@ -177,3 +177,31 @@ func TestDefaultHome(t *testing.T) {
 		t.Fatalf("n=%d err=%v", n, err)
 	}
 }
+
+func TestWorkingDirectory(t *testing.T) {
+	ctx := context.Background()
+	py, err := pywasi.New(ctx, pywasi.WithArchive(pywasi.DefaultArchive))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer py.Close()
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "data.txt"), []byte("hello"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var out strings.Builder
+	code, err := py.Run(ctx, pywasi.RunOptions{
+		Args:   []string{"-c", `import os; print(os.getcwd(), open("data.txt").read(), "PYWASI_CWD" in os.environ)`},
+		Mounts: []pywasi.Mount{{Host: dir, Guest: "/work"}},
+		Dir:    "/work",
+		Stdout: &out,
+		Stderr: &out,
+	})
+	if err != nil || code != 0 || strings.TrimSpace(out.String()) != "/work hello False" {
+		t.Fatalf("code=%d err=%v output %q", code, err, out.String())
+	}
+
+	if _, err := py.Run(ctx, pywasi.RunOptions{Args: []string{"-c", "pass"}, Dir: "work"}); err == nil {
+		t.Error("relative Dir: expected an error")
+	}
+}

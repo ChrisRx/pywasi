@@ -74,18 +74,22 @@ PyPI (pure Python) or from prebuilt bundles (numpy), so this needs no
 compiler either. See [Pure-Python packages](#pure-python-packages-without-a-build)
 and [Packages with C extensions](#packages-with-c-extensions-still-without-a-build).
 
-There's also a command for running the interpreter directly, with an
-interactive prompt when given no arguments:
+There's also a command for running the interpreter directly, like a native
+`python`: with an interactive prompt when given no arguments, and in the
+current directory, which it mounts at the same path:
 
 ```sh
 go run go.chrisrx.dev/pywasi/cmd/pywasi@latest                       # REPL
-go run go.chrisrx.dev/pywasi/cmd/pywasi@latest -- -c 'print(1 + 1)'
-go run ./cmd/pywasi -mount .:/app -- /app/script.py                   # in a checkout
+go run go.chrisrx.dev/pywasi/cmd/pywasi@latest script.py
+go run go.chrisrx.dev/pywasi/cmd/pywasi@latest -- -c 'print(open("data.txt").read())'
 ```
 
 It uses `$PYWASI_HOME` or `./.pywasi` if there is one, else the embedded
-interpreter (`-home` picks another). The prompt is CPython's basic one,
-without line editing, since the newer one needs `termios`, which WASI lacks.
+interpreter (`-home` picks another). `-mount HOST:/GUEST` exposes more
+directories, and `-cwd=false` leaves out the current one. The prompt is
+CPython's basic one, without line editing, since the newer one needs
+`termios`, which WASI lacks. From Go, `RunOptions.Dir` sets the working
+directory.
 
 With no interpreter options, `New` uses `$PYWASI_HOME` or `./.pywasi` if
 one exists, and otherwise the standard library interpreter embedded in the

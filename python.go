@@ -44,6 +44,10 @@ type RunOptions struct {
 	Stdin  io.Reader
 	Stdout io.Writer
 	Stderr io.Writer
+	// Dir is the working directory inside the guest, an absolute guest
+	// path such as a Mount's (default "/"). It needs an interpreter built by
+	// pywasi; a plain CPython build ignores it.
+	Dir string
 
 	// fsMounts are pywasi's own mounts (not checked against reservedGuest).
 	fsMounts []fsMount
@@ -278,6 +282,9 @@ func checkMounts(mounts []Mount) error {
 }
 
 func (p *Python) run(ctx context.Context, opts RunOptions) (int, error) {
+	if opts.Dir != "" && !path.IsAbs(opts.Dir) {
+		return 0, fmt.Errorf("pywasi: RunOptions.Dir %q must be an absolute guest path", opts.Dir)
+	}
 	fsCfg := wazero.NewFSConfig().WithReadOnlyDirMount(p.home, "/")
 	for _, m := range opts.Mounts {
 		host, err := filepath.Abs(m.Host)
@@ -323,6 +330,10 @@ func (p *Python) run(ctx context.Context, opts RunOptions) (int, error) {
 	}
 	if len(pythonPath) > 0 {
 		modCfg = modCfg.WithEnv("PYTHONPATH", strings.Join(pythonPath, ":"))
+	}
+	if opts.Dir != "" {
+		// Read and removed by pywasi_main.c, which changes to it.
+		modCfg = modCfg.WithEnv("PYWASI_CWD", path.Clean(opts.Dir))
 	}
 	if opts.Stdin != nil {
 		modCfg = modCfg.WithStdin(opts.Stdin)
