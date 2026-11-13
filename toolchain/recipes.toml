@@ -27,10 +27,11 @@ config-settings.setup-args = [
     "-Dcpu-baseline=none",
     "-Dcpu-dispatch=none",
     "-Ddisable-svml=true",
-    "-Ddisable-highway=true",
+    # Highway only for its sort (numpy-wasm-highway-sort.patch).
+    "-Ddisable-highway=false",
     "-Ddisable-intel-sort=true",
 ]
-patches = ["numpy-xerbla-length.patch", "numpy-wasm-fpstatus.patch"]
+patches = ["numpy-xerbla-length.patch", "numpy-wasm-fpstatus.patch", "numpy-wasm-highway-sort.patch"]
 exclude-extensions = '^numpy\._core\.(_[a-z_]+_tests|_simd)$'
 
 [pyyaml]

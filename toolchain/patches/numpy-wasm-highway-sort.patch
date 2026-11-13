@@ -1,0 +1,95 @@
+numpy: Highway's vectorized quicksort on wasm.
+
+numpy's CPU dispatch has no wasm targets, so np.sort fell back to its
+scalar quicksort. Call Highway's VQSortStatic (WASM SIMD128 target)
+directly for 32- and 64-bit keys, ascending and descending. Highway's
+seed uses clock(), which WASI lacks, so use clock_gettime there. Used by
+toolchain/recipes.toml.
+
+--- a/numpy/_core/meson.build
++++ b/numpy/_core/meson.build
+@@ -1259,6 +1259,7 @@
+   'src/npysort/timsort_generic.cpp',
+   'src/npysort/heapsort.cpp',
+   'src/npysort/npysort_methods.cpp',
++  'src/npysort/highway_qsort_wasm.cpp',
+   'src/common/npy_partition.h',
+   'src/npysort/selection.cpp',
+   'src/common/npy_binsearch.h',
+--- a/numpy/_core/src/highway/hwy/contrib/sort/vqsort-inl.h
++++ b/numpy/_core/src/highway/hwy/contrib/sort/vqsort-inl.h
+@@ -64,7 +64,14 @@
+   void (*seed_code)(void*) = &Fill16BytesStatic;
+   const uintptr_t bits_stack = reinterpret_cast<uintptr_t>(seed_stack);
+   const uintptr_t bits_code = reinterpret_cast<uintptr_t>(seed_code);
++#if HWY_ARCH_WASM
++  // pywasi: WASI has no process clock (clock() isn't linkable).
++  struct timespec ts;
++  clock_gettime(CLOCK_MONOTONIC, &ts);
++  const uint64_t bits_time = static_cast<uint64_t>(ts.tv_nsec);
++#else
+   const uint64_t bits_time = static_cast<uint64_t>(clock());
++#endif
+   words[0] = bits_stack ^ bits_time ^ 0xFEDCBA98;  // "Nothing up my sleeve"
+   words[1] = bits_code ^ bits_time ^ 0x01234567;   // constants.
+ }
+--- a/numpy/_core/src/npysort/highway_qsort.hpp
++++ b/numpy/_core/src/npysort/highway_qsort.hpp
+@@ -11,6 +11,10 @@
+ #include "highway_qsort_16bit.dispatch.h"
+ NPY_CPU_DISPATCH_DECLARE(template <typename T> void QSort, (T *arr, npy_intp size, bool reverse))
+ 
++#if defined(__wasm_simd128__)
++template <typename T> void QSortWasm(T *arr, npy_intp size, bool reverse);
++#endif
++
+ } // np::highway::qsort_simd
+ 
+ #endif // NUMPY_SRC_COMMON_NPYSORT_HWY_SIMD_QSORT_HPP
+--- a/numpy/_core/src/npysort/highway_qsort_wasm.cpp
++++ b/numpy/_core/src/npysort/highway_qsort_wasm.cpp
+@@ -0,0 +1,31 @@
++/*
++ * pywasi: Highway's vectorized quicksort for wasm SIMD128, called directly
++ * since numpy's CPU dispatch has no wasm targets.
++ */
++#if defined(__wasm_simd128__)
++#define VQSORT_ONLY_STATIC 1
++#include "hwy/highway.h"
++#include "hwy/contrib/sort/vqsort-inl.h"
++
++#include "highway_qsort.hpp"
++
++namespace np::highway::qsort_simd {
++template <typename T>
++void QSortWasm(T *arr, npy_intp size, bool reverse)
++{
++    if (reverse) {
++        hwy::HWY_NAMESPACE::VQSortStatic(arr, size, hwy::SortDescending());
++    }
++    else {
++        hwy::HWY_NAMESPACE::VQSortStatic(arr, size, hwy::SortAscending());
++    }
++}
++
++template void QSortWasm<int32_t>(int32_t *, npy_intp, bool);
++template void QSortWasm<uint32_t>(uint32_t *, npy_intp, bool);
++template void QSortWasm<int64_t>(int64_t *, npy_intp, bool);
++template void QSortWasm<uint64_t>(uint64_t *, npy_intp, bool);
++template void QSortWasm<float>(float *, npy_intp, bool);
++template void QSortWasm<double>(double *, npy_intp, bool);
++}  // namespace np::highway::qsort_simd
++#endif
+--- a/numpy/_core/src/npysort/quicksort.hpp
++++ b/numpy/_core/src/npysort/quicksort.hpp
+@@ -48,7 +48,9 @@
+         #endif
+         }
+         else if constexpr (sizeof(T) == sizeof(uint32_t) || sizeof(T) == sizeof(uint64_t)) {
+-        #if defined(NPY_CPU_AMD64) || defined(NPY_CPU_X86) // x86 32-bit and 64-bit
++        #if defined(__wasm_simd128__)
++            dispfunc = np::highway::qsort_simd::template QSortWasm<TF>;
++        #elif defined(NPY_CPU_AMD64) || defined(NPY_CPU_X86) // x86 32-bit and 64-bit
+             if constexpr (!reverse) { // x86 SIMD sort is ascending-only
+                 #include "x86_simd_qsort.dispatch.h"
+                 NPY_CPU_DISPATCH_CALL_XB(dispfunc = np::qsort_simd::template QSort, <TF>);
