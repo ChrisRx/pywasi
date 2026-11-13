@@ -552,19 +552,39 @@ def compile_registration(stem: Path, modules: list[Module]) -> Path:
 # Pre-initialization
 
 
-def compile_bytecode(lib: Path):
+def scrub_paths(tree: Path):
+    """Replace this checkout's path with /pywasi in Python and JSON files.
+
+    CPython's sysconfig data and some packages' build info (numpy's
+    __config__.py) record build-time paths, which would make outputs depend
+    on where the checkout is and leak it. Nothing at runtime uses them.
+    """
+    old, new = str(ROOT).encode(), b"/pywasi"
+    for path in tree.rglob("*"):
+        if path.suffix in (".py", ".json") and path.is_file():
+            data = path.read_bytes()
+            if old in data:
+                path.write_bytes(data.replace(old, new))
+
+
+def compile_bytecode(lib: Path, root: Path, guest: str = "/"):
     """Precompile lib to .pyc (one optimization level).
 
     Imports outside the snapshot read these instead of compiling every run
     (several times faster). Hash-based "unchecked" pycs don't depend on file
     timestamps, which archives reset, and are never rewritten.
+
+    Each .pyc records its source path: the path under root, placed at guest
+    (where it is at runtime), so the build directory doesn't end up in the
+    bytecode and the same sources always give the same files. Python fixes
+    the path up to the real location on import anyway.
     """
     for cache in lib.rglob("__pycache__"):
         shutil.rmtree(cache)
     run(
         [
             TOOLCHAIN / "wasi-python", "-m", "compileall", "-q", "-o", "0",
-            "--invalidation-mode", "unchecked-hash", lib,
+            "--invalidation-mode", "unchecked-hash", "-s", root, "-p", guest, lib,
         ]
     )
 
@@ -751,7 +771,8 @@ def main():
         shutil.copytree(target.stdlib, lib, ignore=STDLIB_IGNORE)
         install_support(lib)
         shutil.copytree(site, lib / "site-packages")
-        compile_bytecode(lib)
+        scrub_paths(lib)
+        compile_bytecode(lib, out)
 
         abi = abi_id(linked, target)
         if args.kit:
@@ -804,6 +825,13 @@ def abi_id(linked: Linked, target: Target) -> str:
     return h.hexdigest()[:16]
 
 
+def strip_debug(*paths: Path):
+    """Remove debug sections from objects and archives: they record build
+    paths, and the link strips them from python.wasm anyway (--strip-debug)."""
+    if paths:
+        run([Path(os.environ["WASI_SDK_PATH"]) / "bin" / "llvm-strip", "--strip-debug", *paths])
+
+
 def write_kit(linked: Linked, lib: Path, target: Target, abi: str, archive: Path):
     """Everything to link python.wasm except package objects, as a .tar.zst:
 
@@ -850,6 +878,7 @@ def write_kit(linked: Linked, lib: Path, target: Target, abi: str, archive: Path
                 args.append(a)
         if not inputs_placed:
             raise BuildError("kit: package objects not found in the link command")
+        strip_debug(*(f for f in (stage / "link").iterdir() if f.suffix in (".o", ".a")))
         link_json = {"version": 1, "abi": abi, "python": target.markers["python_full_version"], "args": args}
         (stage / "link.json").write_text(json.dumps(link_json, indent=2) + "\n")
         shutil.copytree(lib, stage / "lib" / lib.name, ignore=shutil.ignore_patterns("site-packages"))
@@ -875,11 +904,13 @@ def write_bundle(pkg: Package, files: Path, linked: Linked, target: Target, abi:
         (stage / "objects").mkdir()
         for m in modules:
             shutil.copy(m.obj, stage / "objects" / m.obj.name)
+        strip_debug(*(stage / "objects").iterdir())
         compile_registration(stage / "registration", modules)
         (stage / "registration.c").unlink()
         suffixes = (target.ext_suffix, ".abi3.so")
         shutil.copytree(files, stage / "site", ignore=lambda d, names: [n for n in names if n.endswith(suffixes)])
-        compile_bytecode(stage / "site")
+        scrub_paths(stage / "site")
+        compile_bytecode(stage / "site", stage / "site", "/site")
         requires = []
         for meta in (stage / "site").glob("*.dist-info/METADATA"):
             requires = email.parser.Parser().parsestr(meta.read_text(), headersonly=True).get_all("Requires-Dist") or []
