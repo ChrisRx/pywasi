@@ -20,9 +20,9 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/tetratelabs/wazero"
-	"github.com/tetratelabs/wazero/imports/wasi_snapshot_preview1"
-	"github.com/tetratelabs/wazero/sys"
+	"github.com/ChrisRx/wazero"
+	"github.com/ChrisRx/wazero/imports/wasi_snapshot_preview1"
+	"github.com/ChrisRx/wazero/sys"
 	"go.chrisrx.dev/x/context"
 
 	"go.chrisrx.dev/pywasi/builder"
@@ -68,11 +68,13 @@ type Python struct {
 	digest string
 	// bundleSites are the Python files of linked-in bundles.
 	bundleSites []string
+	// boundsChecks is WithBoundsChecks.
+	boundsChecks bool
 }
 
 // relink replaces the interpreter with one linked with layers' bundles.
 func (p *Python) relink(ctx context.Context, layers layers, cacheDir string) error {
-	home, sites, err := linkInterpreter(ctx, *layers.Linker, *layers.Kit, layers.Bundles, cacheDir)
+	home, sites, err := linkInterpreter(ctx, *layers.Linker, *layers.Kit, layers.Bundles, cacheDir, p.boundsChecks)
 	if err != nil {
 		return err
 	}
@@ -80,7 +82,7 @@ func (p *Python) relink(ctx context.Context, layers layers, cacheDir string) err
 	if err != nil {
 		return err
 	}
-	compiled, err := p.runtime.CompileModule(ctx, wasm)
+	compiled, err := p.runtime.CompileModule(compileContext(ctx, p.boundsChecks), wasm)
 	if err != nil {
 		return fmt.Errorf("pywasi: compiling linked interpreter: %w", err)
 	}
@@ -172,13 +174,13 @@ func New(ctx context.Context, options ...Option) (*Python, error) {
 		r.Close(ctx)
 		return nil, fmt.Errorf("pywasi: instantiating WASI: %w", err)
 	}
-	compiled, err := r.CompileModule(ctx, wasm)
+	compiled, err := r.CompileModule(compileContext(ctx, opts.boundsChecks), wasm)
 	if err != nil {
 		r.Close(ctx)
 		return nil, fmt.Errorf("pywasi: compiling interpreter: %w", err)
 	}
 	sum := sha256.Sum256(wasm)
-	p := &Python{runtime: r, compiled: compiled, home: home, digest: hex.EncodeToString(sum[:16])}
+	p := &Python{runtime: r, compiled: compiled, home: home, digest: hex.EncodeToString(sum[:16]), boundsChecks: opts.boundsChecks}
 	// Pure-Python packages are resolved by this interpreter, before the
 	// modules are mounted.
 	site, layers, err := p.packageLayer(ctx, opts)

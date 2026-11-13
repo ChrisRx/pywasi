@@ -1,8 +1,11 @@
 package pywasi
 
 import (
+	"context"
 	"io"
 	"io/fs"
+
+	"github.com/ChrisRx/wazero/experimental"
 )
 
 // Option configures New.
@@ -27,6 +30,7 @@ type config struct {
 	index        string
 	catalog      string
 	catalogSet   bool
+	boundsChecks bool
 }
 
 // WithHome uses a prebuilt interpreter: a directory containing
@@ -129,4 +133,26 @@ func WithModules(fsys fs.FS) Option {
 // each Run, Eval or Call instead.
 func WithRunOptions(opts RunOptions) Option {
 	return func(c *config) { c.run = &opts }
+}
+
+// WithBoundsChecks compiles python.wasm with bounds checks on every memory
+// access, so an out-of-bounds access traps as the WebAssembly spec requires.
+//
+// By default pywasi compiles without them (wazero's
+// experimental.WithUncheckedMemoryAccess): each instance's memory is a
+// fixed 8 GiB virtual reservation, of which only touched pages use physical
+// memory, that every address python.wasm can compute falls inside, which
+// makes pure-Python code 6-30% faster. An out-of-bounds access, which only
+// a bug in C code could make, then reads or writes inside that instance's
+// reservation instead of trapping. It can't reach the host's memory.
+func WithBoundsChecks() Option {
+	return func(c *config) { c.boundsChecks = true }
+}
+
+// compileContext is ctx for compiling wasm, with or without bounds checks.
+func compileContext(ctx context.Context, boundsChecks bool) context.Context {
+	if boundsChecks {
+		return ctx
+	}
+	return experimental.WithUncheckedMemoryAccess(ctx)
 }

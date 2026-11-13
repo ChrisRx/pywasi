@@ -13,10 +13,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ChrisRx/wazero"
+	"github.com/ChrisRx/wazero/imports/wasi_snapshot_preview1"
+	"github.com/ChrisRx/wazero/sys"
 	"github.com/klauspost/compress/zstd"
-	"github.com/tetratelabs/wazero"
-	"github.com/tetratelabs/wazero/imports/wasi_snapshot_preview1"
-	"github.com/tetratelabs/wazero/sys"
 	"go.chrisrx.dev/x/context"
 )
 
@@ -136,7 +136,7 @@ func (c *catalog) prebuilt(python string) (kitEntry, map[string][]bundleEntry, b
 // running in wazero, and returns the new interpreter home (cached by its
 // inputs) and the bundles' site-packages directories, to mount at
 // bundleGuest(i).
-func linkInterpreter(ctx context.Context, linker artifact, kit kitEntry, bundles []bundleEntry, cacheDir string) (string, []string, error) {
+func linkInterpreter(ctx context.Context, linker artifact, kit kitEntry, bundles []bundleEntry, cacheDir string, boundsChecks bool) (string, []string, error) {
 	data, err := dataDir()
 	if err != nil {
 		return "", nil, err
@@ -237,14 +237,14 @@ func linkInterpreter(ctx context.Context, linker artifact, kit kitEntry, bundles
 			args = append(args, a)
 		}
 	}
-	if err := runWasm(ctx, lld, args, fsCfg, cacheDir); err != nil {
+	if err := runWasm(compileContext(ctx, boundsChecks), lld, args, fsCfg, cacheDir); err != nil {
 		return "", nil, fmt.Errorf("pywasi: linking interpreter: %w", err)
 	}
 	if err := os.CopyFS(filepath.Join(tmp, "lib"), os.DirFS(filepath.Join(kitDir, "lib"))); err != nil {
 		return "", nil, err
 	}
 	// Without a snapshot the interpreter still works, only slower to start.
-	if err := snapshotLinked(ctx, tmp, sites, preload, cacheDir); err != nil {
+	if err := snapshotLinked(compileContext(ctx, boundsChecks), tmp, sites, preload, cacheDir); err != nil {
 		msg := []byte(fmt.Sprintf("pywasi: snapshot failed: %v\n", err))
 		if err := os.WriteFile(filepath.Join(tmp, "snapshot-error.txt"), msg, 0o644); err != nil {
 			return "", nil, err

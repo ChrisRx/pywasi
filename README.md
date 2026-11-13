@@ -74,6 +74,19 @@ PyPI (pure Python) or from prebuilt bundles (numpy), so this needs no
 compiler either. See [Pure-Python packages](#pure-python-packages-without-a-build)
 and [Packages with C extensions](#packages-with-c-extensions-still-without-a-build).
 
+There's also a command for running the interpreter directly, with an
+interactive prompt when given no arguments:
+
+```sh
+go run go.chrisrx.dev/pywasi/cmd/pywasi@latest                       # REPL
+go run go.chrisrx.dev/pywasi/cmd/pywasi@latest -- -c 'print(1 + 1)'
+go run ./cmd/pywasi -mount .:/app -- /app/script.py                   # in a checkout
+```
+
+It uses `$PYWASI_HOME` or `./.pywasi` if there is one, else the embedded
+interpreter (`-home` picks another). The prompt is CPython's basic one,
+without line editing, since the newer one needs `termios`, which WASI lacks.
+
 With no interpreter options, `New` uses `$PYWASI_HOME` or `./.pywasi` if
 one exists, and otherwise the standard library interpreter embedded in the
 package (`pywasi.DefaultArchive`, about 7 MiB). Everything is cached under
@@ -371,17 +384,29 @@ Everything is compiled with wasm SIMD128, and numpy uses OpenBLAS (its
 from `nix/openblas-wasi.nix`, and `np.sort` uses Highway's vectorized
 quicksort (`toolchain/patches/numpy-wasm-highway-sort.patch`). CPython
 allocates with mimalloc (`PYTHONMALLOC` overrides it), which is 5-15% faster
-than wasi-libc's malloc on object-heavy code. Versus native CPython 3.14 with
-numpy 2.5.4 and OpenBLAS on x86-64, one thread (`OMP_NUM_THREADS=1`), pinned
-to one performance core, best of 3 runs:
+than wasi-libc's malloc on object-heavy code.
 
-| | wasmtime | wazero (Go) |
+pywasi uses a fork of wazero
+([github.com/ChrisRx/wazero](https://github.com/ChrisRx/wazero), branch
+`pywasi`) that saves its trap context once per function frame instead of at
+every memory access, and compiles python.wasm without memory bounds checks:
+each instance's memory is a fixed 8 GiB virtual reservation (only touched
+pages use physical memory) that every address python.wasm can compute falls
+inside. Together these make pure-Python code 10-50% faster. An
+out-of-bounds access, which only a bug in C code could make, then stays
+inside that instance's memory instead of trapping. `WithBoundsChecks()`
+turns the checks back on.
+
+Versus native CPython 3.14 with numpy 2.5.4 and OpenBLAS on x86-64, one
+thread (`OMP_NUM_THREADS=1`), pinned to one performance core, best of 3 runs:
+
+| | wasmtime | pywasi (wazero) |
 |---|---|---|
-| Pure Python | ~1.2-2x slower | ~1.7-4x slower |
-| numpy elementwise, reductions, FFT | ~1-1.8x | ~1.4-3x |
+| Pure Python | ~1.2-2x slower | ~1.5-2.7x slower |
+| numpy elementwise, reductions, FFT | ~1-1.8x | ~1.3-2.2x |
 | `linalg.solve` 1000x1000 | ~2.5x | ~6.5x |
 | matmul 1000x1000 | ~3x | ~7.5x |
-| `np.sort` | ~4x | ~6.5x |
+| `np.sort` | ~4x | ~6x |
 
 Native numpy uses AVX2/AVX-512 kernels for matmul and sort, and wasm SIMD is
 128 bits wide.
