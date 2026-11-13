@@ -67,6 +67,25 @@ stdenv.mkDerivation {
       s/xerbla_\(\s*char\s*\*,\s*integer\s*\*\s*\)/xerbla_(char *, integer *, ftnlen)/g;
       s/xerbla_\(("[A-Z0-9_]+"),\s*([^,()]+)\)/xerbla_($1, $2, (ftnlen)(sizeof $1 - 1))/g;
     ' {} +
+
+    # A register-blocked 4x4 DGEMM kernel (patches/openblas-dgemm-wasm128-4x4.c)
+    # in place of the generic 2x2 dot-product one, also used as the DTRMM
+    # kernel, with the packing routines that match its unroll.
+    cp ${./patches/openblas-dgemm-wasm128-4x4.c} kernel/wasm/dgemm_kernel_4x4_wasm128.c
+    sed -i -E \
+      -e 's|^DGEMMKERNEL( *)=.*|DGEMMKERNEL\1= dgemm_kernel_4x4_wasm128.c|' \
+      -e 's|^DGEMMONCOPY( *)=.*|DGEMMONCOPY\1= ../generic/gemm_ncopy_4.c|' \
+      -e 's|^DGEMMOTCOPY( *)=.*|DGEMMOTCOPY\1= ../generic/gemm_tcopy_4.c|' \
+      -e 's|^DTRMMKERNEL(\s*)=.*|DTRMMKERNEL\1= dgemm_kernel_4x4_wasm128.c|' \
+      kernel/wasm/KERNEL.WASM128_GENERIC
+    # The base KERNEL file sets the TRMM kernel unconditionally (it is read
+    # after the target's), so it needs the change too.
+    sed -i -E 's|^DTRMMKERNEL(\s*)=.*|DTRMMKERNEL\1= dgemm_kernel_4x4_wasm128.c|' kernel/wasm/KERNEL
+    sed -i -E '/defined\(RISCV64_GENERIC\) \|\| defined\(WASM128_GENERIC\)/,/DGEMM_DEFAULT_UNROLL_N/ s/(DGEMM_DEFAULT_UNROLL_[MN]) +2/\1  4/' param.h
+    grep -q 'DGEMMKERNEL *= dgemm_kernel_4x4_wasm128.c' kernel/wasm/KERNEL.WASM128_GENERIC
+    grep -q 'DTRMMKERNEL.*dgemm_kernel_4x4_wasm128.c' kernel/wasm/KERNEL.WASM128_GENERIC
+    grep -q 'DTRMMKERNEL.*dgemm_kernel_4x4_wasm128.c' kernel/wasm/KERNEL
+    [ "$(grep -c 'DGEMM_DEFAULT_UNROLL_[MN]  4' param.h)" -ge 2 ]
   '';
 
   makeFlags = [

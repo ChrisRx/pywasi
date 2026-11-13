@@ -16,8 +16,9 @@ inside the archives. Run in the dev shell (Python 3.14 for zstd):
     scripts/catalog.py --linker result/bin/lld.wasm --kit kit.tar.zst --bundle numpy-*.tar.zst
 
 Uploads go through scripts/publish.sh (credentials as documented there).
-Entries already in the catalog are kept; a kit or bundle with the same
-sha256 isn't added twice.
+Entries already in the catalog are kept, except that a bundle replaces an
+older one of the same package version for the same kit (abi). Nothing is
+added twice.
 """
 
 import argparse
@@ -82,6 +83,13 @@ def main():
     for bundle in args.bundle:
         meta = member_json(bundle, "bundle.json")
         url, digest = publish(bundle, "bundles")
+        # A rebuild of the same package for the same kit replaces the old one.
+        index["bundles"] = [
+            b
+            for b in index["bundles"]
+            if b["sha256"] == digest
+            or (b["name"], b["version"], b["abi"]) != (meta["name"], meta["package_version"], meta["abi"])
+        ]
         if not any(b["sha256"] == digest for b in index["bundles"]):
             index["bundles"].append(
                 {
