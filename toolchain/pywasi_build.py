@@ -638,7 +638,9 @@ def env_project(requirements: list[str], preload: list[str]) -> Path:
     version on first use and then stay locked.
     """
     reqs = sorted({str(Requirement(r)) for r in requirements})
-    key = hashlib.sha256(json.dumps([reqs, preload, TOOLCHAIN_REV, LAYOUT_REV]).encode()).hexdigest()[:16]
+    # The base CPython build too, so rebuilding it rebuilds every set.
+    base = hashlib.sha256((BASE / "bin" / "python.wasm").read_bytes()).hexdigest() if (BASE / "bin" / "python.wasm").exists() else ""
+    key = hashlib.sha256(json.dumps([reqs, preload, TOOLCHAIN_REV, LAYOUT_REV, base]).encode()).hexdigest()[:16]
     project = CACHE / "envs" / key
     if (project / "uv.lock").exists():
         return project

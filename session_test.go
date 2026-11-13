@@ -115,3 +115,24 @@ func TestSessionCancel(t *testing.T) {
 		t.Fatalf("after cancel: %v", err)
 	}
 }
+
+func TestSleep(t *testing.T) {
+	// time.sleep needs relative timers (CPython is built without
+	// clock_nanosleep), which wazero supports.
+	t.Setenv("PYWASI_CACHE", t.TempDir())
+	t.Setenv("PYWASI_HOME", t.TempDir())
+	ctx := context.Background()
+	const code = "import time\nt = time.monotonic()\ntime.sleep(0.1)\ntime.monotonic() - t"
+	if d, err := pywasi.Eval[float64](ctx, code); err != nil || d < 0.1 || d > 1 {
+		t.Fatalf("Eval slept %v, err=%v", d, err)
+	}
+	py, err := pywasi.New(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer py.Close()
+	s := newSession(t, py)
+	if d, err := s.Eval[float64](ctx, code); err != nil || d < 0.1 || d > 1 {
+		t.Fatalf("Session slept %v, err=%v", d, err)
+	}
+}

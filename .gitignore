@@ -6,3 +6,4 @@ result-*
 .venv/
 __pycache__/
 *.test
+*.tar.zst.sha256

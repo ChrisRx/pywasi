@@ -118,7 +118,8 @@ func TestPackagesLinked(t *testing.T) {
 		t.Fatal(err)
 	}
 	got, err := py.Eval[string](context.Background(), `
-		import numpy as np, tabulate
+		import numpy as np, tabulate, time
+		time.sleep(0.01)
 		tabulate.tabulate(np.linalg.inv(np.array([[4.0, 1.0], [2.0, 3.0]])).round(2))
 	`)
 	if err != nil || !strings.Contains(got, "0.3") || !strings.Contains(got, "-0.2") {

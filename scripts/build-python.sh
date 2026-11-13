@@ -44,10 +44,17 @@ python3 Tools/wasm/wasi build-python --quiet --logdir "$log_dir"
 # sysroot, so pass them in directly. --prefix=/ makes the installed tree
 # relocatable to the guest root, and the test suite is left out. SIMD128
 # lets clang vectorize loops (wasmtime and wazero both support it).
+#
+# Without clock_nanosleep (in libc or librt), time.sleep uses nanosleep.
+# clock_nanosleep sleeps
+# until an absolute deadline, which wasi-libc passes to poll_oneoff as an
+# absolute clock subscription, and some runtimes (wazero) only support
+# relative ones.
 CFLAGS="-msimd128" \
 ZLIB_CFLAGS="-I$PYWASI_ZLIB/include" \
 ZLIB_LIBS="-L$PYWASI_ZLIB/lib -lz" \
-  python3 Tools/wasm/wasi build-host --quiet --logdir "$log_dir" -- --prefix=/ --disable-test-modules
+  python3 Tools/wasm/wasi build-host --quiet --logdir "$log_dir" -- --prefix=/ --disable-test-modules \
+  ac_cv_func_clock_nanosleep=no ac_cv_lib_rt_clock_nanosleep=no
 
 host_dir="$cpython/cross-build/wasm32-wasip1"
 rm -rf "$dist"
