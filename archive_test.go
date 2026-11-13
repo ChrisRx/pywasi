@@ -55,7 +55,7 @@ func TestArchiveErrors(t *testing.T) {
 
 	// Wrong digest.
 	_, err = pywasi.New(ctx, pywasi.WithArchive(pywasi.ArchiveURL(
-		"https://pywasi.chrisrx.dev/interpreters/python3.14-stdlib-f1dfcc0b2ee8.tar.zst",
+		"https://pywasi.chrisrx.dev/interpreters/python3.14-stdlib-e5d010bec70d.tar.zst",
 		"sha256:"+strings.Repeat("0", 64))))
 	if err == nil || !strings.Contains(err.Error(), "digest") {
 		t.Errorf("wrong digest: %v", err)

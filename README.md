@@ -369,16 +369,19 @@ See `toolchain/recipes.toml` for the built-in ones.
 Everything is compiled with wasm SIMD128, and numpy uses OpenBLAS (its
 `WASM128_GENERIC` SIMD kernels, a register-blocked DGEMM kernel, plus LAPACK)
 from `nix/openblas-wasi.nix`, and `np.sort` uses Highway's vectorized
-quicksort (`toolchain/patches/numpy-wasm-highway-sort.patch`). Versus native CPython 3.14 with numpy 2.5.4 and
-OpenBLAS on x86-64, one thread (`OMP_NUM_THREADS=1`), best of 3 runs:
+quicksort (`toolchain/patches/numpy-wasm-highway-sort.patch`). CPython
+allocates with mimalloc (`PYTHONMALLOC` overrides it), which is 5-15% faster
+than wasi-libc's malloc on object-heavy code. Versus native CPython 3.14 with
+numpy 2.5.4 and OpenBLAS on x86-64, one thread (`OMP_NUM_THREADS=1`), pinned
+to one performance core, best of 3 runs:
 
 | | wasmtime | wazero (Go) |
 |---|---|---|
-| Pure Python | ~1.5-2x slower | ~2-4.5x slower |
-| numpy elementwise, reductions, FFT | ~1-2x | ~1.5-3x |
+| Pure Python | ~1.2-2x slower | ~1.7-4x slower |
+| numpy elementwise, reductions, FFT | ~1-1.8x | ~1.4-3x |
 | `linalg.solve` 1000x1000 | ~2.5x | ~6.5x |
-| matmul 1000x1000 | ~3x | ~8x |
-| `np.sort` | ~3x | ~5x |
+| matmul 1000x1000 | ~3x | ~7.5x |
+| `np.sort` | ~4x | ~6.5x |
 
 Native numpy uses AVX2/AVX-512 kernels for matmul and sort, and wasm SIMD is
 128 bits wide.

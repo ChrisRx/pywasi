@@ -48,6 +48,25 @@ static int register_builtins(void) {
     return nregistered ? PyImport_ExtendInittab(registered) : 0;
 }
 
+/* Pre-initializes CPython with mimalloc as the memory allocator unless
+ * PYTHONMALLOC says otherwise. CPython only defaults to mimalloc in
+ * free-threaded builds and leaves pymalloc out on WASI, so it would use
+ * wasi-libc's dlmalloc for every object: mimalloc is 5-20% faster on
+ * object-heavy code. argv is parsed as Python's command line (NULL for
+ * none), so its options that affect pre-initialization still apply. */
+static void preinitialize(int argc, char **argv) {
+    PyPreConfig preconfig;
+    PyPreConfig_InitPythonConfig(&preconfig);
+    const char *env = getenv("PYTHONMALLOC");
+    if (!env || !*env) {
+        preconfig.allocator = PYMEM_ALLOCATOR_MIMALLOC;
+    }
+    PyStatus status = argv ? Py_PreInitializeFromBytesArgs(&preconfig, argc, argv) : Py_PreInitialize(&preconfig);
+    if (PyStatus_Exception(status)) {
+        Py_ExitStatusException(status);
+    }
+}
+
 /* Set by wizer-initialize; non-NULL means we're running from a snapshot. */
 static PyObject *resume_fn;
 
@@ -65,6 +84,7 @@ __attribute__((export_name("wizer-initialize"))) void pywasi_initialize(void) {
         fatal("registering built-in extensions failed");
     }
 
+    preinitialize(0, NULL);
     PyConfig config;
     PyConfig_InitPythonConfig(&config);
     PyStatus status = Py_InitializeFromConfig(&config);
@@ -116,6 +136,7 @@ int main(int argc, char **argv) {
         if (register_builtins() < 0) {
             return 1;
         }
+        preinitialize(argc, argv);
         return Py_BytesMain(argc, argv);
     }
 
