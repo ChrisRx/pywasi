@@ -1,9 +1,88 @@
 # pywasi
 
-Build a uv project, C extensions included, into a single WASI `python.wasm`
-that runs under wazero (pure Go) or wasmtime.
+Run Python in Go, C extensions like numpy included. CPython is compiled to
+WASI and runs in [wazero](https://wazero.io), so there's no cgo and nothing
+to install: the default interpreter is embedded in the package.
 
-## Build
+## Quick start
+
+```sh
+go get go.chrisrx.dev/pywasi   # needs Go 1.27
+```
+
+```go
+package main
+
+import (
+	"context"
+	"fmt"
+	"log"
+
+	"go.chrisrx.dev/pywasi"
+)
+
+func main() {
+	ctx := context.Background()
+
+	// Evaluate code and get the value of its last expression.
+	n, err := pywasi.Eval[int](ctx, `
+		import math
+		math.factorial(10)
+	`)
+	if err != nil {
+		log.Fatal(err)
+	}
+	fmt.Println(n) // 3628800
+
+	// Call a function, here in a module defined inline.
+	area, err := pywasi.Call[float64](ctx, pywasi.Func{
+		Module: "shapes",
+		Name:   "circle_area",
+		Args:   []any{2.0},
+	}, pywasi.WithModule("shapes", `
+		import math
+
+		def circle_area(r):
+		    return math.pi * r * r
+	`))
+	if err != nil {
+		log.Fatal(err)
+	}
+	fmt.Printf("%.2f\n", area) // 12.57
+}
+```
+
+The package-level `Eval` and `Call` create an interpreter, run, and close
+it. To make several calls, create one with `New` and use its methods:
+
+```go
+py, err := pywasi.New(ctx, pywasi.WithPackages("numpy", "tabulate"))
+if err != nil {
+	log.Fatal(err)
+}
+defer py.Close()
+
+inv, err := py.Eval[[][]float64](ctx, `
+	import numpy as np
+	np.linalg.inv(np.array([[4.0, 1.0], [2.0, 3.0]]))
+`)
+```
+
+`New` compiles the interpreter once, and each `Run`, `Eval` or `Call` is a
+fresh, isolated interpreter, safe to use concurrently. Packages come from
+PyPI (pure Python) or from prebuilt bundles (numpy), so this needs no
+compiler either. See [Pure-Python packages](#pure-python-packages-without-a-build)
+and [Packages with C extensions](#packages-with-c-extensions-still-without-a-build).
+
+With no interpreter options, `New` uses `$PYWASI_HOME` or `./.pywasi` if
+one exists, and otherwise the standard library interpreter embedded in the
+package (`pywasi.DefaultArchive`, about 7 MiB). Everything is cached under
+`os.UserCacheDir()/pywasi` (or `$PYWASI_CACHE`).
+
+## Building your own interpreter
+
+For packages that aren't prebuilt, build an interpreter from a uv project
+with the Nix toolchain in this repository:
 
 ```sh
 nix develop
@@ -14,53 +93,31 @@ cd .. && ./scripts/build.sh myapp   # -> myapp/.pywasi/{bin/python.wasm,lib/}
 
 The first run builds CPython for WASI (a few minutes). Packages with a
 `py3-none-any` wheel are installed as-is. Everything else is compiled from
-its sdist and statically linked into `python.wasm`.
-
-## Run
+its sdist and statically linked into `python.wasm`. Run it with the CLI, or
+from Go with `WithHome`:
 
 ```sh
 go run ./cmd/pywasi -home myapp/.pywasi -mount myapp:/app -- /app/main.py
 ```
 
-## Inline in Go, no project
-
-The Python code can be a string and the dependencies a list, either bare
-names or pinned (`examples/inline`):
+Or let Go build it from a list of dependencies, either bare names or pinned
+(`examples/inline`):
 
 ```go
-const code = `
-import numpy as np
-import yaml
-
-m = np.array([[4.0, 1.0], [2.0, 3.0]])
-print(yaml.safe_dump({"inverse": np.linalg.inv(m).round(2).tolist()}))
-`
-
 py, err := pywasi.New(ctx,
 	pywasi.WithDependencies("numpy", "pyyaml==6.0.3"), // any PEP 508 specifier
 	pywasi.WithPreload("numpy", "yaml"),               // import names, snapshotted
 )
-if err != nil {
-	log.Fatal(err)
-}
-defer py.Close()
-py.Run(ctx, pywasi.RunOptions{Args: []string{"-c", code}, Stdout: os.Stdout})
 ```
 
-With `WithDependencies`, `New` builds the interpreter (via `builder.Ensure`, which
-runs `scripts/build.sh --with ...`). This needs this checkout and its Nix
+`WithDependencies` builds through `builder.Ensure`, which runs
+`scripts/build.sh --with ...`. This needs this checkout and its Nix
 toolchain. It enters `nix develop` itself if needed, and `WithRoot` or
 `PYWASI_ROOT` points it at the checkout. The first build of a dependency set
 compiles anything with C code, which takes minutes for numpy. After that the
 set is cached and locked, so a bare `numpy` stays on the version it first
 resolved to. To ship a prebuilt interpreter, call `builder.Ensure` ahead of
-time and pass its result to `WithHome` instead.
-
-With no interpreter options, `New` uses `$PYWASI_HOME` or `./.pywasi` if
-one exists, and otherwise the standard library interpreter embedded in the
-package (`pywasi.DefaultArchive`, about 7 MiB), so `pywasi.New(ctx)` works
-anywhere, offline, with no toolchain. Everything
-is cached under `os.UserCacheDir()/pywasi` (or `$PYWASI_CACHE`).
+time and pass its result to `WithHome`, or pack it as an archive.
 
 ## Interpreter archives
 
@@ -150,9 +207,6 @@ Bundles link only with a kit of the same ABI id (same CPython build and
 toolchain). A package that is neither pure Python nor in the catalog is an
 error that says so.
 
-`New` compiles once. Each `Run` is a fresh, isolated interpreter and can be
-called concurrently.
-
 ## Returning values and calling functions
 
 `Eval` runs code and decodes the value of its last expression, like a
@@ -219,8 +273,9 @@ They stay in memory and are mounted read-only under `/.pywasi/modules` on
 
 The request and response go through a temporary directory mounted at
 `/.pywasi/io`, so the code's own `print`s still go to `RunOptions.Stdout`, and
-`python.wasm` stays a plain WASI program. Each call is a fresh interpreter
-(about 0.25s on wazero with the snapshot).
+`python.wasm` stays a plain WASI program. Each call is a fresh interpreter:
+about 25-30ms with a startup snapshot (numpy preloaded), and 60-150ms
+without one, depending on imports.
 
 ## Fast startup
 
@@ -233,7 +288,8 @@ modules listed in `preload` are imported, and that memory is snapshotted into
 preload = ["numpy"]
 ```
 
-For the example app under wazero, this takes a run from 1.2s to 0.3s. The
+For the example app under wazero, this takes a run from 1.2s to 0.3s as a
+new process, and an `Eval` using numpy from about 150ms to 30ms. The
 snapshot interpreter accepts `-c`, `-m`, a script, or `-` (no other flags),
 and its string hash seed is fixed at build time. Set `snapshot = false` or
 pass `--no-snapshot` to turn it off.
