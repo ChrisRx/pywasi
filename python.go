@@ -61,10 +61,9 @@ type Python struct {
 	runtime  wazero.Runtime
 	compiled wazero.CompiledModule
 	home     string
-	// modules are WithModule and WithModules file systems, mounted at
-	// pythonPath entries.
-	modules    []fs.FS
-	pythonPath []string
+	// modules are WithModule and WithModules file systems, linked-in
+	// bundles' Python files and pure-Python packages, in PYTHONPATH order.
+	modules []fsMount
 	// digest identifies python.wasm (sha256 prefix), for cache keys.
 	digest string
 	// bundleSites are the Python files of linked-in bundles.
@@ -195,15 +194,14 @@ func New(ctx context.Context, options ...Option) (*Python, error) {
 			return nil, err
 		}
 	}
-	for _, dir := range p.bundleSites {
-		modules = append(modules, os.DirFS(dir))
+	for i, fsys := range modules {
+		p.modules = append(p.modules, fsMount{fsys, fmt.Sprintf("%s/modules/%d", guestRoot, i)})
+	}
+	for i, dir := range p.bundleSites {
+		p.modules = append(p.modules, fsMount{os.DirFS(dir), bundleGuest(i)})
 	}
 	if site != "" {
-		modules = append(modules, os.DirFS(site))
-	}
-	p.modules = modules
-	for i := range modules {
-		p.pythonPath = append(p.pythonPath, fmt.Sprintf("%s/modules/%d", guestRoot, i))
+		p.modules = append(p.modules, fsMount{os.DirFS(site), guestRoot + "/site"})
 	}
 	context.AddCleanup(ctx, func() {
 		if err := p.Close(); err != nil {
@@ -290,8 +288,10 @@ func (p *Python) run(ctx context.Context, opts RunOptions) (int, error) {
 			fsCfg = fsCfg.WithDirMount(host, m.Guest)
 		}
 	}
-	for i, fsys := range p.modules {
-		fsCfg = fsCfg.WithFSMount(fsys, p.pythonPath[i])
+	var pythonPath []string
+	for _, m := range p.modules {
+		fsCfg = fsCfg.WithFSMount(m.fsys, m.guest)
+		pythonPath = append(pythonPath, m.guest)
 	}
 	for _, m := range opts.fsMounts {
 		fsCfg = fsCfg.WithFSMount(m.fsys, m.guest)
@@ -311,7 +311,6 @@ func (p *Python) run(ctx context.Context, opts RunOptions) (int, error) {
 		// wazero's default random source is deterministic; Python's
 		// os.urandom, hash seeds and numpy's default_rng need real entropy.
 		WithRandSource(rand.Reader)
-	pythonPath := p.pythonPath
 	for k, v := range opts.Env {
 		if k == "PYTHONPATH" && len(pythonPath) > 0 {
 			// The caller's entries come first.

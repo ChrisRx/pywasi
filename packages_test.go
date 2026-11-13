@@ -122,17 +122,53 @@ func TestPackagesBuiltIn(t *testing.T) {
 func TestPackagesLinked(t *testing.T) {
 	// numpy has no pure wheel, so it comes from the catalog's prebuilt
 	// bundle, linked into a new interpreter by wasm-ld running in wazero.
-	t.Setenv("PYWASI_CACHE", t.TempDir())
-	py, err := stdlibPython(t, pywasi.WithPackages("numpy", "tabulate"))
+	cache := t.TempDir()
+	t.Setenv("PYWASI_CACHE", cache)
+	// A module shifts the other mounts, which the snapshot mustn't depend on.
+	py, err := stdlibPython(t, pywasi.WithPackages("numpy", "tabulate"), pywasi.WithModule("helper", "x = 1"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	got, err := py.Eval[string](context.Background(), `
+	ctx := context.Background()
+	got, err := py.Eval[string](ctx, `
 		import numpy as np, tabulate, time
 		time.sleep(0.01)
 		tabulate.tabulate(np.linalg.inv(np.array([[4.0, 1.0], [2.0, 3.0]])).round(2))
 	`)
 	if err != nil || !strings.Contains(got, "0.3") || !strings.Contains(got, "-0.2") {
 		t.Fatalf("got %q err=%v", got, err)
+	}
+
+	// The linked interpreter is pre-initialized with numpy imported.
+	if errs, _ := filepath.Glob(filepath.Join(cache, "linked", "*", "snapshot-error.txt")); len(errs) > 0 {
+		b, _ := os.ReadFile(errs[0])
+		t.Fatalf("%s", b)
+	}
+	state, err := py.Eval[[]any](ctx, `
+		import sys
+		preloaded = "numpy" in sys.modules
+		import numpy, numpy.testing, helper
+		[preloaded, numpy.__file__, numpy.testing.__file__, helper.x]
+	`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state[0] != true || !strings.HasPrefix(state[1].(string), "/.pywasi/bundles/0/numpy/") ||
+		!strings.HasPrefix(state[2].(string), "/.pywasi/bundles/0/numpy/testing/") || state[3] != 1.0 {
+		t.Errorf("state %v", state)
+	}
+
+	// Each run still gets its own entropy.
+	const draw = "import numpy, random\n[int(numpy.random.default_rng().integers(1 << 62)), random.random()]"
+	a, err := py.Eval[[]float64](ctx, draw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := py.Eval[[]float64](ctx, draw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a[0] == b[0] || a[1] == b[1] {
+		t.Errorf("same random values in two runs: %v %v", a, b)
 	}
 }

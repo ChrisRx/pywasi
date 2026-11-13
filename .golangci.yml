@@ -17,4 +17,5 @@ linters:
         - (*go.chrisrx.dev/pywasi.Session).Close
         - (*io.PipeWriter).Close
         - (github.com/tetratelabs/wazero.Runtime).Close
+        - (github.com/tetratelabs/wazero.CompiledModule).Close
         - (github.com/tetratelabs/wazero/api.Module).Close

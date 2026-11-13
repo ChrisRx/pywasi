@@ -2,6 +2,7 @@ package pywasi
 
 import (
 	"bytes"
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -30,8 +31,8 @@ const DefaultCatalog = "https://pywasi.chrisrx.dev/index.json"
 // When a requirement resolves to a package with C extensions that the
 // catalog has, New downloads its bundle and a link kit and links an
 // interpreter with them, with wasm-ld running in wazero, so no compiler or
-// Nix is needed. Linked interpreters are cached by their inputs. They don't
-// have a startup snapshot (yet), so each run starts CPython from scratch.
+// Nix is needed. Linked interpreters are cached by their inputs, with a
+// startup snapshot that has the bundles' packages imported.
 func WithCatalog(url string) Option {
 	return func(c *config) { c.catalog, c.catalogSet = url, true }
 }
@@ -133,12 +134,15 @@ func (c *catalog) prebuilt(python string) (kitEntry, map[string][]bundleEntry, b
 
 // linkInterpreter links python.wasm from a kit and bundles with wasm-ld
 // running in wazero, and returns the new interpreter home (cached by its
-// inputs) and the bundles' site-packages directories.
+// inputs) and the bundles' site-packages directories, to mount at
+// bundleGuest(i).
 func linkInterpreter(ctx context.Context, linker artifact, kit kitEntry, bundles []bundleEntry, cacheDir string) (string, []string, error) {
 	data, err := dataDir()
 	if err != nil {
 		return "", nil, err
 	}
+	// A fixed order, since the snapshot records where each bundle is.
+	bundles = slices.SortedFunc(slices.Values(bundles), func(a, b bundleEntry) int { return strings.Compare(a.Name, b.Name) })
 	var sites, bundleDirs []string
 	for _, b := range bundles {
 		if b.ABI != kit.ABI {
@@ -152,11 +156,10 @@ func linkInterpreter(ctx context.Context, linker artifact, kit kitEntry, bundles
 		sites = append(sites, filepath.Join(dir, "site"))
 	}
 
-	ids := []string{linker.SHA256, kit.SHA256}
+	ids := []string{snapshotRev, linker.SHA256, kit.SHA256}
 	for _, b := range bundles {
 		ids = append(ids, b.SHA256)
 	}
-	slices.Sort(ids[2:])
 	home := filepath.Join(data, "linked", digestJSON(ids))
 	if isHome(home) {
 		return home, sites, nil
@@ -198,11 +201,13 @@ func linkInterpreter(ctx context.Context, linker artifact, kit kitEntry, bundles
 		WithReadOnlyDirMount(kitDir, "/kit").
 		WithDirMount(filepath.Join(tmp, "bin"), "/out")
 	var inputs []string
+	preload := []string{"_pywasi"}
 	for i, dir := range bundleDirs {
 		guest := fmt.Sprintf("/b%d", i)
 		fsCfg = fsCfg.WithReadOnlyDirMount(dir, guest)
 		var meta struct {
 			Modules []struct {
+				Name   string `json:"name"`
 				Object string `json:"object"`
 			} `json:"modules"`
 		}
@@ -215,6 +220,9 @@ func linkInterpreter(ctx context.Context, linker artifact, kit kitEntry, bundles
 		}
 		for _, m := range meta.Modules {
 			inputs = append(inputs, guest+"/"+m.Object)
+			if top, _, _ := strings.Cut(m.Name, "."); !slices.Contains(preload, top) {
+				preload = append(preload, top)
+			}
 		}
 		inputs = append(inputs, guest+"/registration.o")
 	}
@@ -234,6 +242,13 @@ func linkInterpreter(ctx context.Context, linker artifact, kit kitEntry, bundles
 	}
 	if err := os.CopyFS(filepath.Join(tmp, "lib"), os.DirFS(filepath.Join(kitDir, "lib"))); err != nil {
 		return "", nil, err
+	}
+	// Without a snapshot the interpreter still works, only slower to start.
+	if err := snapshotLinked(ctx, tmp, sites, preload, cacheDir); err != nil {
+		msg := []byte(fmt.Sprintf("pywasi: snapshot failed: %v\n", err))
+		if err := os.WriteFile(filepath.Join(tmp, "snapshot-error.txt"), msg, 0o644); err != nil {
+			return "", nil, err
+		}
 	}
 	if err := os.Rename(tmp, home); err != nil && !isHome(home) {
 		return "", nil, err
@@ -300,4 +315,55 @@ func runWasm(ctx context.Context, wasm []byte, args []string, fsCfg wazero.FSCon
 		return fmt.Errorf("exit code %d: %s", exitErr.ExitCode(), stderr.String())
 	}
 	return err
+}
+
+// snapshotRev changes the cache key of linked interpreters when how they
+// are snapshotted changes.
+const snapshotRev = "snapshot-1"
+
+// bundleGuest is where the Python files of a linked interpreter's i-th
+// bundle are mounted. It's fixed, since the snapshot imports from there.
+func bundleGuest(i int) string {
+	return fmt.Sprintf("%s/bundles/%d", guestRoot, i)
+}
+
+// snapshotLinked pre-initializes home's python.wasm with the preload
+// modules imported, in the same file system layout as at runtime.
+func snapshotLinked(ctx context.Context, home string, sites, preload []string, cacheDir string) error {
+	wasmPath := filepath.Join(home, "bin", "python.wasm")
+	wasm, err := os.ReadFile(wasmPath)
+	if err != nil {
+		return err
+	}
+	r, err := newSnapshotRuntime(ctx, cacheDir)
+	if err != nil {
+		return err
+	}
+	defer r.Close(context.Background())
+	fsCfg := wazero.NewFSConfig().WithReadOnlyDirMount(home, "/")
+	var path []string
+	for i, dir := range sites {
+		fsCfg = fsCfg.WithReadOnlyDirMount(dir, bundleGuest(i))
+		path = append(path, bundleGuest(i))
+	}
+	var out tailBuffer
+	cfg := wazero.NewModuleConfig().
+		WithArgs("python").
+		WithEnv("PYTHONHOME", "/").
+		WithEnv("PYTHONDONTWRITEBYTECODE", "1").
+		WithEnv("PYTHONPATH", strings.Join(path, ":")).
+		WithEnv("PYWASI_PRELOAD", strings.Join(preload, ",")).
+		WithFSConfig(fsCfg).
+		WithStdout(&out).
+		WithStderr(&out).
+		WithSysWalltime().
+		WithSysNanotime().
+		// Real entropy, as at runtime: the snapshot keeps CPython's string
+		// hash seed.
+		WithRandSource(rand.Reader)
+	snap, err := snapshotWasm(ctx, r, wasm, cfg)
+	if err != nil {
+		return fmt.Errorf("%w: %s", err, out.String())
+	}
+	return writeFileAtomic(wasmPath, snap)
 }

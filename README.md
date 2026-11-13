@@ -193,8 +193,9 @@ The resolver treats catalog bundles as installable versions, so numpy
 resolves to a bundle and tabulate to a wheel. New then downloads what's
 missing (all checked by sha256), links, and caches the interpreter by its
 inputs. The first time takes about 20s (downloads, compiling the linker,
-linking). After that `New` takes about 0.25s and an `Eval` using numpy about
-0.15-0.2s. Linked interpreters don't have a startup snapshot yet.
+linking, and a startup snapshot with the bundles' packages imported, as in
+[Fast startup](#fast-startup)). After that `New` takes about 0.3s and an
+`Eval` using numpy about 30-40ms.
 
 To publish more:
 
@@ -321,6 +322,13 @@ snapshot interpreter accepts `-c`, `-m`, a script, or `-` (no other flags),
 and its string hash seed is fixed at build time. Set `snapshot = false` or
 pass `--no-snapshot` to turn it off.
 
+Interpreters linked from Go (C-extension packages from the catalog) get the
+same snapshot without Wizer: after linking, New runs the initialization in
+wazero with the bundles' packages preloaded, and writes the resulting memory
+and globals back into the module (`snapshot.go`). If that fails, the
+interpreter still works without it, and the reason is in
+`snapshot-error.txt` next to it in the cache.
+
 ## Example: PyYAML with libyaml
 
 ```sh
@@ -360,7 +368,8 @@ See `toolchain/recipes.toml` for the built-in ones.
 
 Everything is compiled with wasm SIMD128, and numpy uses OpenBLAS (its
 `WASM128_GENERIC` SIMD kernels, a register-blocked DGEMM kernel, plus LAPACK)
-from `nix/openblas-wasi.nix`. Versus native CPython 3.14 with numpy 2.5.4 and
+from `nix/openblas-wasi.nix`, and `np.sort` uses Highway's vectorized
+quicksort (`toolchain/patches/numpy-wasm-highway-sort.patch`). Versus native CPython 3.14 with numpy 2.5.4 and
 OpenBLAS on x86-64, one thread (`OMP_NUM_THREADS=1`), best of 3 runs:
 
 | | wasmtime | wazero (Go) |
@@ -369,7 +378,7 @@ OpenBLAS on x86-64, one thread (`OMP_NUM_THREADS=1`), best of 3 runs:
 | numpy elementwise, reductions, FFT | ~1-2x | ~1.5-3x |
 | `linalg.solve` 1000x1000 | ~2.5x | ~6.5x |
 | matmul 1000x1000 | ~3x | ~8x |
-| `np.sort` | ~10x | ~15x |
+| `np.sort` | ~3x | ~5x |
 
 Native numpy uses AVX2/AVX-512 kernels for matmul and sort, and wasm SIMD is
 128 bits wide.

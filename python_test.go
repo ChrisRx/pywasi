@@ -177,4 +177,3 @@ func TestDefaultHome(t *testing.T) {
 		t.Fatalf("n=%d err=%v", n, err)
 	}
 }
-
