@@ -2,6 +2,7 @@
 // else $PYWASI_HOME or .pywasi if it exists, else the embedded standard
 // library interpreter. The current directory is mounted at the same path and
 // Python starts in it, like a native python (-cwd=false turns that off).
+// Python can use the network (-net=false turns that off).
 //
 //	go run ./cmd/pywasi                        # interactive prompt
 //	go run ./cmd/pywasi -c 'print(1 + 1)'
@@ -39,6 +40,7 @@ func main() {
 		home  = flag.String("home", "", "Python install tree (bin/python.wasm, lib/python3.X), e.g. PROJECT/.pywasi; defaults to $PYWASI_HOME or .pywasi if it exists, else the embedded standard library interpreter")
 		cache = flag.String("cache", pywasi.DefaultCacheDir(), "compiled code cache directory (empty disables)")
 		cwd   = flag.Bool("cwd", true, "mount the current directory at the same path (/cwd on Windows) and start in it")
+		net   = flag.Bool("net", true, "let Python use the network: listen, connect and resolve host names")
 		mnts  mounts
 	)
 	flag.Var(&mnts, "mount", "mount a host directory as HOST:/GUEST (repeatable)")
@@ -59,6 +61,9 @@ func main() {
 	opts := []pywasi.Option{cacheOption(*cache)}
 	if *home != "" {
 		opts = append(opts, pywasi.WithHome(*home))
+	}
+	if *net {
+		opts = append(opts, pywasi.WithNetwork(nil))
 	}
 	py, err := pywasi.New(ctx, opts...)
 	if err != nil {

@@ -65,6 +65,9 @@
               WASI_SDK_PATH = "${pywasiPkgs.wasi-sdk}";
               # Static C libraries for wasm32-wasip1 (nix/c-libs.nix).
               PYWASI_ZLIB = "${pywasiPkgs.zlib-wasi}";
+              PYWASI_OPENSSL = "${pywasiPkgs.openssl}";
+              # CA certificates shipped with interpreters, for ssl.
+              PYWASI_CACERT = "${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt";
               PYWASI_SYSROOT = "${pywasiPkgs.sysroot}";
               UV_PYTHON = "${pkgs.python3}/bin/python3";
               UV_PYTHON_DOWNLOADS = "never";

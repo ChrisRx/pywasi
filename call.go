@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 
 	"go.chrisrx.dev/x/context"
 )
@@ -209,7 +210,8 @@ func (p *Python) runModule(ctx context.Context, module string, req, out any, o R
 	o.Mounts = append(o.Mounts[:len(o.Mounts):len(o.Mounts)], Mount{Host: dir, Guest: ioGuest})
 	o.Args = []string{"-m", module, ioGuest}
 
-	code, err := p.run(ctx, o)
+	disabled := new(atomic.Bool)
+	code, err := p.run(context.WithValue(ctx, disabledKey{}, disabled), o)
 	if err != nil {
 		return err
 	}
@@ -220,7 +222,12 @@ func (p *Python) runModule(ctx context.Context, module string, req, out any, o R
 		}
 		return err
 	}
-	return decodeResponse(data, out)
+	err = decodeResponse(data, out)
+	var perr *Error
+	if disabled.Load() && errors.As(err, &perr) && perr.Type == "PermissionError" {
+		perr.Message += " (network access is disabled; enable it with pywasi.WithNetwork)"
+	}
+	return err
 }
 
 // decodeResponse decodes {"ok": true, "value": ...} into out, or returns

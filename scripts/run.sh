@@ -15,7 +15,13 @@ shift
 
 case "$runtime" in
   wasmtime)
+    # A linked interpreter imports pywasi's host functions (sockets); the
+    # stub fails them (toolchain/pywasi_build.py builds it).
+    preload=()
+    stub="$root/build/pywasi-host-stub.wasm"
+    [ -f "$stub" ] && preload=(--preload "pywasi=$stub")
     exec wasmtime run \
+      "${preload[@]}" \
       --wasm max-wasm-stack=16777216 \
       --dir "$dist::/" \
       --env PYTHONHOME=/ \

@@ -31,6 +31,20 @@ type config struct {
 	catalog      string
 	catalogSet   bool
 	boundsChecks bool
+	network      network
+}
+
+// WithNetwork lets Python use sockets: listen on and connect to TCP
+// addresses, and resolve host names. allow, if not nil, decides each
+// operation: op is "listen" or "connect" with an address like
+// "127.0.0.1:8080" or "[::]:443", or "resolve" with a host name, a service
+// name ("https") or, for reverse lookups, an IP address. An error denies
+// it, and Python sees a PermissionError.
+//
+// Without WithNetwork, creating a socket or resolving a host name fails
+// with PermissionError. "localhost" and IP addresses still resolve.
+func WithNetwork(allow func(op, address string) error) Option {
+	return func(c *config) { c.network = network{enabled: true, allow: allow} }
 }
 
 // WithHome uses a prebuilt interpreter: a directory containing

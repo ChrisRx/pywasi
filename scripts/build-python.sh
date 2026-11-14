@@ -21,6 +21,7 @@ dist="$root/dist/python"
 
 : "${WASI_SDK_PATH:?run inside nix develop}"
 : "${PYWASI_ZLIB:?run inside nix develop}"
+: "${PYWASI_OPENSSL:?run inside nix develop}"
 
 mkdir -p "$src_dir" "$log_dir"
 
@@ -35,11 +36,31 @@ fi
 
 cd "$cpython"
 
+# Patches to CPython (toolchain/patches/cpython-*.patch), skipping any that
+# are already applied.
+for p in "$root"/toolchain/patches/cpython-*.patch; do
+  if patch -p1 -N --dry-run --silent <"$p" >/dev/null 2>&1; then
+    patch -p1 -N --silent <"$p"
+  fi
+done
+
+# Sockets: wasi-libc's wasm32-wasip1 build leaves out socket, bind, listen,
+# connect and name resolution. toolchain/support/pywasi_socket.c provides
+# them through pywasi's host functions, and its headers declare them, so
+# configure finds them and _socket gets the full API. CPython is linked
+# with the stub build, which fails with ENOSYS and needs no host functions,
+# so this interpreter still runs under wasmtime. pywasi_build.py links the
+# real one.
+support="$root/toolchain/support"
+socket_stub="$root/build/pywasi_socket_stub.o"
+"$WASI_SDK_PATH/bin/clang" --target=wasm32-wasip1 --sysroot="$WASI_SDK_PATH/share/wasi-sysroot" \
+  -O2 -I"$support/include" -DPYWASI_SOCKET_STUB -c "$support/pywasi_socket.c" -o "$socket_stub"
+
 # Native "build Python" first. It runs the build's own Python scripts and
 # must not see the wasm C libraries below.
 python3 Tools/wasm/wasi build-python --quiet --logdir "$log_dir"
 
-# Then the WASI host Python. configure finds optional C libraries through
+# Then the WASI host Python, with ssl and hashlib from nix/openssl-wasi.nix. configure finds optional C libraries through
 # pkg-config, which the WASI build points at the (read-only) wasi-sdk
 # sysroot, so pass them in directly. --prefix=/ makes the installed tree
 # relocatable to the guest root, and the test suite is left out. SIMD128
@@ -50,11 +71,13 @@ python3 Tools/wasm/wasi build-python --quiet --logdir "$log_dir"
 # until an absolute deadline, which wasi-libc passes to poll_oneoff as an
 # absolute clock subscription, and some runtimes (wazero) only support
 # relative ones.
-CFLAGS="-msimd128" \
+CFLAGS="-msimd128 -I$support/include" \
 ZLIB_CFLAGS="-I$PYWASI_ZLIB/include" \
 ZLIB_LIBS="-L$PYWASI_ZLIB/lib -lz" \
   python3 Tools/wasm/wasi build-host --quiet --logdir "$log_dir" -- --prefix=/ --disable-test-modules \
-  ac_cv_func_clock_nanosleep=no ac_cv_lib_rt_clock_nanosleep=no
+  --with-openssl="$PYWASI_OPENSSL" \
+  ac_cv_func_clock_nanosleep=no ac_cv_lib_rt_clock_nanosleep=no \
+  LIBS="$socket_stub"
 
 host_dir="$cpython/cross-build/wasm32-wasip1"
 rm -rf "$dist"

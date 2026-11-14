@@ -501,6 +501,12 @@ def link(site: Path, out_wasm: Path, target: Target, excludes: list[str], work: 
         ]
     )
     run([cc, "-O2", "-c", TOOLCHAIN / "support" / "cxa_abort.c", "-o", work / "cxa_abort.o"])
+    run(
+        [
+            cc, "-O2", f"-I{TOOLCHAIN / 'support' / 'include'}",
+            "-c", TOOLCHAIN / "support" / "pywasi_socket.c", "-o", work / "pywasi_socket.o",
+        ]
+    )
     run([cc, "-O2", "-c", TOOLCHAIN / "support" / "numpy_fpstatus.c", "-o", work / "numpy_fpstatus.o"])
 
     # Reuse CPython's own link line, swapping in our main, adding the
@@ -520,8 +526,13 @@ def link(site: Path, out_wasm: Path, target: Target, excludes: list[str], work: 
             cmd.append(str(out_wasm))
         elif a == "Programs/python.o":
             cmd.append(str(work / "pywasi_main.o"))
+        elif a.endswith("/pywasi_socket_stub.o"):
+            # Sockets through pywasi's host functions, see build-python.sh.
+            cmd.append(str(work / "pywasi_socket.o"))
         else:
             cmd.append(a)
+    if str(work / "pywasi_socket.o") not in cmd:
+        raise BuildError("CPython was built without toolchain/support/pywasi_socket.c; rerun scripts/build-python.sh")
     inputs = [m.obj for m in modules] + [registration]
     # numpy formats and parses long double, which wasi-libc leaves out by default.
     cmd += [str(o) for o in inputs] + [str(work / "cxa_abort.o"), str(work / "numpy_fpstatus.o"), "-lc-printscan-long-double"]
@@ -533,7 +544,10 @@ def link(site: Path, out_wasm: Path, target: Target, excludes: list[str], work: 
 
     # Run wasm-ld directly with the command clang++ would, so a link kit
     # (--kit) records exactly what was run here.
-    dry = subprocess.run(cmd + ["-###"], cwd=target.cpython_build, check=True, capture_output=True, text=True).stderr
+    dry = subprocess.run(cmd + ["-###"], cwd=target.cpython_build, capture_output=True, text=True)
+    if dry.returncode != 0:
+        raise BuildError(f"link: {dry.stderr.strip()}")
+    dry = dry.stderr
     (ld_line,) = [l for l in dry.splitlines() if re.search(r'wasm-ld"? ', l)]
     ld_argv = shlex.split(ld_line)
     out_wasm.parent.mkdir(parents=True, exist_ok=True)
@@ -619,6 +633,28 @@ def install_support(lib: Path):
     shutil.copy(TOOLCHAIN / "support" / "_pywasi.py", lib / "_pywasi.py")
 
 
+def host_stub() -> Path:
+    """A module with pywasi's host functions, all failing with ENOSYS, for
+    running a linked interpreter outside pywasi: wasmtime --preload
+    pywasi=PATH. Built once into build/."""
+    out = ROOT / "build" / "pywasi-host-stub.wasm"
+    src = TOOLCHAIN / "support" / "pywasi_host_stub.c"
+    if not out.exists() or out.stat().st_mtime < src.stat().st_mtime:
+        sdk = Path(os.environ["WASI_SDK_PATH"])
+        run([sdk / "bin" / "clang", "--target=wasm32", "-nostdlib", "-O2", "-Wl,--no-entry", src, "-o", out])
+    return out
+
+
+def install_certs(home: Path):
+    """Ship CA certificates where OpenSSL looks for them (OPENSSLDIR is
+    /etc/ssl in the guest, and home is mounted at the guest root), so ssl
+    can verify servers. SSL_CERT_FILE overrides them."""
+    certs = home / "etc" / "ssl" / "cert.pem"
+    certs.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy(os.environ["PYWASI_CACERT"], certs)
+    certs.chmod(0o644)
+
+
 def snapshot(home: Path, preload: list[str]):
     """Pre-initialize home/bin/python.wasm in place with Wizer.
 
@@ -640,6 +676,8 @@ def snapshot(home: Path, preload: list[str]):
             "--env", "PYTHONDONTWRITEBYTECODE=1",
             "--env", f"PYWASI_PRELOAD={','.join(preload)}",
             "--rename-func", "_start=pywasi-resume",
+            # pywasi's host functions, failing (sockets aren't used here).
+            "--preload", f"pywasi={host_stub()}",
             "-o", tmp, wasm,
         ],
         stdout=subprocess.DEVNULL,
@@ -770,6 +808,7 @@ def main():
         lib = out / "lib" / target.stdlib.name
         shutil.copytree(target.stdlib, lib, ignore=STDLIB_IGNORE)
         install_support(lib)
+        install_certs(out)
         shutil.copytree(site, lib / "site-packages")
         scrub_paths(lib)
         compile_bytecode(lib, out)
@@ -840,6 +879,7 @@ def write_kit(linked: Linked, lib: Path, target: Target, abi: str, archive: Path
                     package objects (modules and registrations) go
         link/       every file the command reads, at /kit/link/... in args
         lib/        the standard library, as in an interpreter home
+        etc/        CA certificates (etc/ssl/cert.pem), likewise
     """
     stage = Path(tempfile.mkdtemp(prefix="pywasi-kit-", dir=ROOT / "build"))
     try:
@@ -882,6 +922,8 @@ def write_kit(linked: Linked, lib: Path, target: Target, abi: str, archive: Path
         link_json = {"version": 1, "abi": abi, "python": target.markers["python_full_version"], "args": args}
         (stage / "link.json").write_text(json.dumps(link_json, indent=2) + "\n")
         shutil.copytree(lib, stage / "lib" / lib.name, ignore=shutil.ignore_patterns("site-packages"))
+        # CA certificates (install_certs), at the same place in linked homes.
+        shutil.copytree(lib.parent.parent / "etc", stage / "etc")
         digest = write_archive(stage, archive)
         log(f"kit: {archive} ({archive.stat().st_size / 2**20:.1f} MiB, abi {abi}, sha256:{digest})")
     finally:

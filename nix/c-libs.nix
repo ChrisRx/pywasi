@@ -11,6 +11,9 @@ in
   # BLAS/LAPACK for numpy (and anything else using CBLAS/LAPACK).
   openblas = pkgs.callPackage ./openblas-wasi.nix { inherit wasi-sdk; };
 
+  # For CPython's ssl and hashlib.
+  openssl = pkgs.callPackage ./openssl-wasi.nix { inherit wasi-sdk; };
+
   # For PyYAML's C accelerator (yaml._yaml).
   libyaml = mkWasiLib {
     pname = "libyaml";

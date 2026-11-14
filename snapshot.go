@@ -475,5 +475,10 @@ func newSnapshotRuntime(ctx context.Context, cacheDir string) (wazero.Runtime, e
 		r.Close(ctx)
 		return nil, err
 	}
+	// No network while snapshotting.
+	if err := instantiateHost(ctx, r, network{}); err != nil {
+		r.Close(ctx)
+		return nil, err
+	}
 	return r, nil
 }

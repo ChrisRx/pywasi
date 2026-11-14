@@ -243,6 +243,12 @@ func linkInterpreter(ctx context.Context, linker artifact, kit kitEntry, bundles
 	if err := os.CopyFS(filepath.Join(tmp, "lib"), os.DirFS(filepath.Join(kitDir, "lib"))); err != nil {
 		return "", nil, err
 	}
+	// CA certificates for ssl, in kits built with OpenSSL.
+	if etc := filepath.Join(kitDir, "etc"); isDir(etc) {
+		if err := os.CopyFS(filepath.Join(tmp, "etc"), os.DirFS(etc)); err != nil {
+			return "", nil, err
+		}
+	}
 	// Without a snapshot the interpreter still works, only slower to start.
 	if err := snapshotLinked(compileContext(ctx, boundsChecks), tmp, sites, preload, cacheDir); err != nil {
 		msg := []byte(fmt.Sprintf("pywasi: snapshot failed: %v\n", err))

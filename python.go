@@ -178,6 +178,10 @@ func New(ctx context.Context, options ...Option) (*Python, error) {
 		r.Close(ctx)
 		return nil, fmt.Errorf("pywasi: instantiating WASI: %w", err)
 	}
+	if err := instantiateHost(ctx, r, opts.network); err != nil {
+		r.Close(ctx)
+		return nil, fmt.Errorf("pywasi: instantiating host functions: %w", err)
+	}
 	compiled, err := r.CompileModule(compileContext(ctx, opts.boundsChecks), wasm)
 	if err != nil {
 		r.Close(ctx)
@@ -351,7 +355,14 @@ func (p *Python) run(ctx context.Context, opts RunOptions) (int, error) {
 	}
 	var exitErr *sys.ExitError
 	if errors.As(err, &exitErr) {
-		return int(exitErr.ExitCode()), nil
+		switch code := exitErr.ExitCode(); code {
+		case sys.ExitCodeContextCanceled, sys.ExitCodeDeadlineExceeded:
+			// Stopped waiting (on a socket, or sleeping) because ctx is
+			// done.
+			return 0, ctx.Err()
+		default:
+			return int(code), nil
+		}
 	}
 	if err != nil {
 		return 0, err

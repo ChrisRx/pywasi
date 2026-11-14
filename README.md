@@ -83,19 +83,60 @@ go run go.chrisrx.dev/pywasi/cmd/pywasi@latest                       # REPL
 go run go.chrisrx.dev/pywasi/cmd/pywasi@latest script.py
 go run go.chrisrx.dev/pywasi/cmd/pywasi@latest -c 'print(open("data.txt").read())'
 go run go.chrisrx.dev/pywasi/cmd/pywasi@latest -m json.tool data.json
+go run go.chrisrx.dev/pywasi/cmd/pywasi@latest -m http.server 8000
 ```
 
 It uses `$PYWASI_HOME` or `./.pywasi` if there is one, else the embedded
 interpreter (`-home` picks another). `-mount HOST:/GUEST` exposes more
 directories, and `-cwd=false` leaves out the current one. The prompt is
 CPython's basic one, without line editing, since the newer one needs
-`termios`, which WASI lacks. From Go, `RunOptions.Dir` sets the working
-directory.
+`termios`, which WASI lacks. Python can use the network, like a native
+python, and `-net=false` turns that off (see [Network](#network)). From Go, `RunOptions.Dir` sets the working directory.
 
 With no interpreter options, `New` uses `$PYWASI_HOME` or `./.pywasi` if
 one exists, and otherwise the standard library interpreter embedded in the
-package (`pywasi.DefaultArchive`, about 7 MiB). Everything is cached under
+package (`pywasi.DefaultArchive`, about 8 MiB). Everything is cached under
 `os.UserCacheDir()/pywasi` (or `$PYWASI_CACHE`).
+
+## Network
+
+Python can listen, connect and resolve host names with `WithNetwork`, so
+`socket`, `ssl`, `http.server`, `urllib` (HTTPS included) and the like work:
+
+```go
+py, err := pywasi.New(ctx, pywasi.WithNetwork(func(op, address string) error {
+	// op is "listen", "connect" or "resolve"; address is "host:port", or a
+	// name for "resolve". Return an error to deny it. nil allows everything.
+	if op == "listen" && !strings.HasPrefix(address, "127.0.0.1:") {
+		return errors.New("local only")
+	}
+	return nil
+}))
+```
+
+Without it, creating a socket or resolving a name raises `PermissionError`
+(`localhost` and IP addresses still resolve), and from `Eval` or `Call` its
+message says to use `WithNetwork`. WASI preview 1 can only
+accept, read and write on sockets, so the interpreter's
+`toolchain/support/pywasi_socket.c` implements `socket`, `bind`, `listen`,
+`connect`, `getaddrinfo` and the rest with host functions in Go
+(`sockets.go`), which open real listeners and connections that the WASI
+calls then use. Canceling `Run`'s context stops Python while it waits on a
+socket or sleeps.
+
+`ssl` and `hashlib` use OpenSSL 3.5, built for WASI in
+`nix/openssl-wasi.nix`. TLS runs inside the guest. Interpreters ship
+Mozilla's CA certificates (from nixpkgs' cacert) at `/etc/ssl/cert.pem`,
+OpenSSL's default, so certificates are verified as usual; `SSL_CERT_FILE` or
+`cafile=` point elsewhere.
+
+There are no threads, so `socketserver`'s threading servers (and
+`python -m http.server`) handle one request at a time. Only TCP is
+supported, and `connect` doesn't time out with the socket's timeout.
+
+An interpreter linked by pywasi imports these host functions, so to run it
+under wasmtime, preload stubs that fail them: `wasmtime run --preload
+pywasi=build/pywasi-host-stub.wasm ...` (`scripts/run.sh` does this).
 
 ## Building your own interpreter
 
@@ -393,8 +434,9 @@ than wasi-libc's malloc on object-heavy code.
 
 pywasi uses a fork of wazero
 ([github.com/ChrisRx/wazero](https://github.com/ChrisRx/wazero), branch
-`pywasi`) that saves its trap context once per function frame instead of at
-every memory access, and compiles python.wasm without memory bounds checks:
+`sockets`) that saves its trap context once per function frame instead of at
+every memory access (and adds what [Network](#network) needs), and compiles
+python.wasm without memory bounds checks:
 each instance's memory is a fixed 8 GiB virtual reservation (only touched
 pages use physical memory) that every address python.wasm can compute falls
 inside. Together these make pure-Python code 10-50% faster. An
@@ -420,7 +462,7 @@ Native numpy uses AVX2/AVX-512 kernels for matmul and sort, and wasm SIMD is
 
 - No Rust extensions (maturin) yet.
 - C libraries a package needs must be added to `nix/c-libs.nix` first. zlib,
-  libyaml and OpenBLAS are there now.
+  OpenSSL, libyaml and OpenBLAS are there now.
 - No threads (WASI preview 1), so BLAS runs single-threaded.
 - C++ exceptions abort instead of unwinding.
 - wasm has no floating-point exception flags. numpy's explicit errors work

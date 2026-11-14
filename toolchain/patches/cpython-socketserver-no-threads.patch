@@ -1,0 +1,17 @@
+--- a/Lib/socketserver.py
++++ b/Lib/socketserver.py
+@@ -707,8 +707,13 @@
+         t = threading.Thread(target = self.process_request_thread,
+                              args = (request, client_address))
+         t.daemon = self.daemon_threads
++        try:
++            t.start()
++        except RuntimeError:
++            # No threads (WASI): handle the request in this one.
++            self.process_request_thread(request, client_address)
++            return
+         self._threads.append(t)
+-        t.start()
+ 
+     def server_close(self):
+         super().server_close()
