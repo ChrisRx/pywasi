@@ -81,7 +81,8 @@ current directory, which it mounts at the same path:
 ```sh
 go run go.chrisrx.dev/pywasi/cmd/pywasi@latest                       # REPL
 go run go.chrisrx.dev/pywasi/cmd/pywasi@latest script.py
-go run go.chrisrx.dev/pywasi/cmd/pywasi@latest -- -c 'print(open("data.txt").read())'
+go run go.chrisrx.dev/pywasi/cmd/pywasi@latest -c 'print(open("data.txt").read())'
+go run go.chrisrx.dev/pywasi/cmd/pywasi@latest -m json.tool data.json
 ```
 
 It uses `$PYWASI_HOME` or `./.pywasi` if there is one, else the embedded

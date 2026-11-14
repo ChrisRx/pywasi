@@ -4,8 +4,9 @@
 // Python starts in it, like a native python (-cwd=false turns that off).
 //
 //	go run ./cmd/pywasi                        # interactive prompt
-//	go run ./cmd/pywasi -- -c 'print(1 + 1)'
-//	go run ./cmd/pywasi -home examples/numpy-app/.pywasi -- -c 'import numpy; print(numpy.__version__)'
+//	go run ./cmd/pywasi -c 'print(1 + 1)'
+//	go run ./cmd/pywasi -m http.server 8000
+//	go run ./cmd/pywasi -home examples/numpy-app/.pywasi -c 'import numpy; print(numpy.__version__)'
 //	go run ./cmd/pywasi -home examples/numpy-app/.pywasi -mount examples/numpy-app:/app -- /app/main.py
 package main
 
@@ -41,11 +42,18 @@ func main() {
 		mnts  mounts
 	)
 	flag.Var(&mnts, "mount", "mount a host directory as HOST:/GUEST (repeatable)")
+	flag.String("m", "", "run library module as a script, like python -m; the arguments after it go to the module")
+	flag.String("c", "", "run a program passed in as a string, like python -c; the arguments after it go to the program")
 	flag.Usage = func() {
-		fmt.Fprintf(os.Stderr, "usage: pywasi [flags] [--] [python args...]\n")
+		fmt.Fprintf(os.Stderr, "usage: pywasi [flags] [--] [python args...]\n       pywasi [flags] -m module [args...]\n       pywasi [flags] -c command [args...]\n")
 		flag.PrintDefaults()
 	}
-	flag.Parse()
+	flags, python := splitPython(flag.CommandLine, os.Args[1:])
+	_ = flag.CommandLine.Parse(flags)
+	args := flag.Args()
+	if python != nil {
+		args = python
+	}
 
 	ctx := context.Background()
 	opts := []pywasi.Option{cacheOption(*cache)}
@@ -72,7 +80,7 @@ func main() {
 		dir = mountWorkingDirectory(&mnts)
 	}
 	code, err := py.Run(ctx, pywasi.RunOptions{
-		Args:   flag.Args(),
+		Args:   args,
 		Env:    env,
 		Dir:    dir,
 		Mounts: mnts,
@@ -114,4 +122,35 @@ func mountWorkingDirectory(mnts *mounts) string {
 	}
 	*mnts = append(*mnts, pywasi.Mount{Host: wd, Guest: guest})
 	return guest
+}
+
+// splitPython splits args at -m or -c, which like python's end the flags:
+// the module name or command and everything after it go to Python, so their
+// own flags aren't parsed as pywasi's. python is nil without either.
+func splitPython(fs *flag.FlagSet, args []string) (flags, python []string) {
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		if a == "--" || a == "-" || !strings.HasPrefix(a, "-") {
+			break
+		}
+		name, value, hasValue := strings.Cut(strings.TrimLeft(a, "-"), "=")
+		if name == "m" || name == "c" {
+			if hasValue {
+				return args[:i], append([]string{"-" + name, value}, args[i+1:]...)
+			}
+			if i+1 == len(args) {
+				break // Let the flag package report the missing value.
+			}
+			return args[:i], append([]string{"-" + name}, args[i+1:]...)
+		}
+		f := fs.Lookup(name)
+		if f == nil || hasValue {
+			continue
+		}
+		if b, ok := f.Value.(interface{ IsBoolFlag() bool }); ok && b.IsBoolFlag() {
+			continue
+		}
+		i++ // Skip the flag's value.
+	}
+	return args, nil
 }
