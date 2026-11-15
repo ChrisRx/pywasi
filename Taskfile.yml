@@ -1,0 +1,38 @@
+version: "3"
+
+vars:
+  # Run in the dev shell (flake.nix) unless already in one.
+  NIX:
+    sh: '[ -n "${IN_NIX_SHELL:-}" ] || echo "nix develop -c"'
+
+tasks:
+  default:
+    cmds:
+      - task --list
+    silent: true
+
+  test:
+    desc: Run the Go tests (some download packages). Extra args go to go test, e.g. task test -- -run TestUDP
+    cmds:
+      - "{{.NIX}} go test -count=1 -timeout 30m {{.CLI_ARGS}} ./..."
+
+  test:short:
+    desc: Run the Go tests that don't download anything
+    cmds:
+      - "{{.NIX}} go test -short -count=1 {{.CLI_ARGS}} ./..."
+
+  test:numpy:
+    desc: Run numpy's test suite under wazero, or one pytest run with args, e.g. task test:numpy -- _core/tests/test_multiarray.py -k sort
+    cmds:
+      - "{{.NIX}} scripts/test-numpy.sh {{.CLI_ARGS}}"
+
+  lint:
+    desc: Run golangci-lint
+    cmds:
+      - "{{.NIX}} golangci-lint run ./..."
+
+  check:
+    desc: Lint, then run the Go tests
+    cmds:
+      - task: lint
+      - task: test

@@ -765,6 +765,10 @@ def main():
         help="also write a bundle (.tar.zst) for each package built from source into DIR",
     )
     ap.add_argument(
+        "--all-extensions", action="store_true",
+        help="link every extension module, ignoring recipes' exclude-extensions (to run a package's own tests)",
+    )
+    ap.add_argument(
         "--env", action="store_true",
         help="build for the --with requirements, which may be none (standard library only)",
     )
@@ -799,7 +803,7 @@ def main():
         built = {}  # name -> (Package, its installed files)
         for pkg in packages:
             recipe = recipes.get(pkg.name, {})
-            if "exclude-extensions" in recipe:
+            if "exclude-extensions" in recipe and not args.all_extensions:
                 excludes.append(recipe["exclude-extensions"])
             wheel = None if pkg.local else pure_wheel(pkg, target)
             if wheel:

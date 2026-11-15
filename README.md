@@ -485,3 +485,22 @@ Native numpy uses AVX2/AVX-512 kernels for matmul and sort, and wasm SIMD is
   warn.
 - Your app's own code isn't packaged unless the project has a
   `[build-system]`. Mount it instead.
+
+## Development
+
+Tasks run in the Nix dev shell (`nix develop`), entering it if needed:
+
+```sh
+task test          # Go tests; some download packages. task test -- -run TestUDP
+task test:short    # Go tests that don't download anything
+task lint          # golangci-lint
+task test:numpy    # numpy's own test suite under wazero
+task test:numpy -- _core/tests/test_multiarray.py -k sort
+```
+
+`task test:numpy` builds numpy with this repo's patches plus the test-only
+extension modules that published bundles leave out, then runs each test file
+in its own interpreter. It fails only if a file crashes the interpreter or
+times out: tests that need `ctypes`, `mmap`, `os.dup`, processes or
+floating-point exception flags are expected to fail. Logs are in
+`build/numpy-tests/logs`.

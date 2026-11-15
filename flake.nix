@@ -52,6 +52,7 @@
               wasm-tools
               go
               golangci-lint
+              go-task # Taskfile.yml
               ninja
               pkg-config
 
