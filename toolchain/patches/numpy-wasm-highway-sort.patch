@@ -1,11 +1,16 @@
-numpy: Highway's vectorized quicksort on wasm.
+numpy: Highway's vectorized sort, argsort and partition on wasm.
 
-numpy's CPU dispatch has no wasm targets, so np.sort fell back to its
-scalar quicksort. Call Highway's VQSortStatic (WASM SIMD128 target)
-directly for 32- and 64-bit keys, ascending and descending. Highway's
-seed uses clock(), which WASI lacks, so use clock_gettime there. Used by
-toolchain/recipes.toml.
+numpy's CPU dispatch has no wasm targets, so np.sort, np.argsort and
+np.partition fell back to scalar code. Call Highway's VQSortStatic and
+VQSelectStatic (WASM SIMD128 target) directly for 16-, 32- and 64-bit
+keys. Highway's float select duplicated values when given infinities and
+NaNs, so floats are selected as order-preserving integer keys. argsort is
+a key-value sort of (key, index) pairs, for 32-bit keys and 64-bit
+floats, the types where it beats the scalar argsort. NaNs sort last, as
+in numpy. Highway's seed uses clock(), which WASI lacks, so use
+clock_gettime there. Used by toolchain/recipes.toml.
 
+diff --color -ruN a/numpy/_core/meson.build b/numpy/_core/meson.build
 --- a/numpy/_core/meson.build
 +++ b/numpy/_core/meson.build
 @@ -1259,6 +1259,7 @@
@@ -16,6 +21,7 @@ toolchain/recipes.toml.
    'src/common/npy_partition.h',
    'src/npysort/selection.cpp',
    'src/common/npy_binsearch.h',
+diff --color -ruN a/numpy/_core/src/highway/hwy/contrib/sort/vqsort-inl.h b/numpy/_core/src/highway/hwy/contrib/sort/vqsort-inl.h
 --- a/numpy/_core/src/highway/hwy/contrib/sort/vqsort-inl.h
 +++ b/numpy/_core/src/highway/hwy/contrib/sort/vqsort-inl.h
 @@ -64,7 +64,14 @@
@@ -33,25 +39,29 @@ toolchain/recipes.toml.
    words[0] = bits_stack ^ bits_time ^ 0xFEDCBA98;  // "Nothing up my sleeve"
    words[1] = bits_code ^ bits_time ^ 0x01234567;   // constants.
  }
+diff --color -ruN a/numpy/_core/src/npysort/highway_qsort.hpp b/numpy/_core/src/npysort/highway_qsort.hpp
 --- a/numpy/_core/src/npysort/highway_qsort.hpp
 +++ b/numpy/_core/src/npysort/highway_qsort.hpp
-@@ -11,6 +11,10 @@
+@@ -11,6 +11,12 @@
  #include "highway_qsort_16bit.dispatch.h"
  NPY_CPU_DISPATCH_DECLARE(template <typename T> void QSort, (T *arr, npy_intp size, bool reverse))
  
 +#if defined(__wasm_simd128__)
 +template <typename T> void QSortWasm(T *arr, npy_intp size, bool reverse);
++template <typename T> void QSelectWasm(T *arr, npy_intp size, npy_intp kth);
++template <typename T> bool ArgQSortWasm(T *arr, npy_intp *arg, npy_intp size);
 +#endif
 +
  } // np::highway::qsort_simd
  
  #endif // NUMPY_SRC_COMMON_NPYSORT_HWY_SIMD_QSORT_HPP
+diff --color -ruN a/numpy/_core/src/npysort/highway_qsort_wasm.cpp b/numpy/_core/src/npysort/highway_qsort_wasm.cpp
 --- a/numpy/_core/src/npysort/highway_qsort_wasm.cpp
 +++ b/numpy/_core/src/npysort/highway_qsort_wasm.cpp
-@@ -0,0 +1,31 @@
+@@ -0,0 +1,151 @@
 +/*
-+ * pywasi: Highway's vectorized quicksort for wasm SIMD128, called directly
-+ * since numpy's CPU dispatch has no wasm targets.
++ * pywasi: Highway's vectorized sort and select for wasm SIMD128, called
++ * directly since numpy's CPU dispatch has no wasm targets.
 + */
 +#if defined(__wasm_simd128__)
 +#define VQSORT_ONLY_STATIC 1
@@ -60,7 +70,52 @@ toolchain/recipes.toml.
 +
 +#include "highway_qsort.hpp"
 +
++#include <cmath>
++#include <cstdlib>
++#include <cstring>
++#include <limits>
++#include <type_traits>
++
 +namespace np::highway::qsort_simd {
++/*
++ * Highway's float select can duplicate values when given infinities and
++ * NaNs, so floats are selected as integers: an order-preserving bijection
++ * maps them to keys and back. Flipping gives
++ * -NaN < -inf < ... < -0 < +0 < ... < +inf < +NaN;
++ * subtracting the mantissa mask then rotates the -NaN block to the top, so
++ * every NaN sorts last, as in numpy. Flipping the sign bit last makes the
++ * keys signed: wasm SIMD has no unsigned 64-bit compare, so Highway would
++ * emulate one and sort about 2x slower.
++ */
++template <typename T>
++struct FloatKeys {
++    using U = std::conditional_t<sizeof(T) == 4, uint32_t, uint64_t>;
++    using I = std::make_signed_t<U>;
++    static constexpr U kSign = U(1) << (sizeof(U) * 8 - 1);
++    static constexpr U kMant = (U(1) << (std::numeric_limits<T>::digits - 1)) - 1;
++
++    static I *Encode(T *arr, npy_intp size)
++    {
++        U *keys = reinterpret_cast<U *>(arr);
++        for (npy_intp i = 0; i < size; i++) {
++            U bits;
++            std::memcpy(&bits, &arr[i], sizeof(bits));
++            bits = (bits & kSign) ? ~bits : (bits | kSign);
++            keys[i] = (bits - kMant) ^ kSign;
++        }
++        return reinterpret_cast<I *>(arr);
++    }
++
++    static void Decode(I *ikeys, npy_intp size)
++    {
++        U *keys = reinterpret_cast<U *>(ikeys);
++        for (npy_intp i = 0; i < size; i++) {
++            U bits = (keys[i] ^ kSign) + kMant;
++            keys[i] = (bits & kSign) ? (bits & ~kSign) : ~bits;
++        }
++    }
++};
++
 +template <typename T>
 +void QSortWasm(T *arr, npy_intp size, bool reverse)
 +{
@@ -72,17 +127,106 @@ toolchain/recipes.toml.
 +    }
 +}
 +
-+template void QSortWasm<int32_t>(int32_t *, npy_intp, bool);
-+template void QSortWasm<uint32_t>(uint32_t *, npy_intp, bool);
-+template void QSortWasm<int64_t>(int64_t *, npy_intp, bool);
-+template void QSortWasm<uint64_t>(uint64_t *, npy_intp, bool);
-+template void QSortWasm<float>(float *, npy_intp, bool);
-+template void QSortWasm<double>(double *, npy_intp, bool);
++template <typename T>
++void QSelectWasm(T *arr, npy_intp size, npy_intp kth)
++{
++    if constexpr (std::is_floating_point_v<T>) {
++        auto *keys = FloatKeys<T>::Encode(arr, size);
++        hwy::HWY_NAMESPACE::VQSelectStatic(keys, size, kth, hwy::SortAscending());
++        FloatKeys<T>::Decode(keys, size);
++    }
++    else {
++        hwy::HWY_NAMESPACE::VQSelectStatic(arr, size, kth, hwy::SortAscending());
++    }
++}
++
++/*
++ * Map a key to an unsigned integer with the same order, NaNs last (as numpy
++ * sorts them).
++ */
++template <typename T, typename U>
++static inline U OrderedBits(T v)
++{
++    constexpr U sign = U(1) << (sizeof(U) * 8 - 1);
++    if constexpr (std::is_floating_point_v<T>) {
++        if (std::isnan(v)) {
++            return ~U(0);
++        }
++        U bits;
++        std::memcpy(&bits, &v, sizeof(bits));
++        return (bits & sign) ? ~bits : (bits | sign);
++    }
++    else if constexpr (std::is_signed_v<T>) {
++        return static_cast<U>(v) ^ sign;
++    }
++    else {
++        return static_cast<U>(v);
++    }
++}
++
++/*
++ * Argsort as a key-value sort: the key is the element (as OrderedBits) and
++ * the value is its index. npy_intp is 32 bits on wasm32, so indices fit
++ * either pair type. Returns false if the scratch buffer can't be allocated.
++ */
++template <typename T>
++bool ArgQSortWasm(T *arr, npy_intp *arg, npy_intp size)
++{
++    using KV = std::conditional_t<sizeof(T) == 4, hwy::K32V32, hwy::K64V64>;
++    using U = std::conditional_t<sizeof(T) == 4, uint32_t, uint64_t>;
++    static_assert(sizeof(npy_intp) <= sizeof(uint32_t), "wasm32 only");
++    KV *kv = static_cast<KV *>(std::aligned_alloc(alignof(KV), sizeof(KV) * (size_t)size));
++    if (kv == nullptr) {
++        return false;
++    }
++    for (npy_intp i = 0; i < size; i++) {
++        kv[i].key = OrderedBits<T, U>(arr[arg[i]]);
++        kv[i].value = static_cast<uint32_t>(arg[i]);
++    }
++    hwy::HWY_NAMESPACE::VQSortStatic(kv, size, hwy::SortAscending());
++    for (npy_intp i = 0; i < size; i++) {
++        arg[i] = static_cast<npy_intp>(kv[i].value);
++    }
++    std::free(kv);
++    return true;
++}
++
++#define PYWASI_INSTANTIATE(T) \
++    template void QSortWasm<T>(T *, npy_intp, bool); \
++    template void QSelectWasm<T>(T *, npy_intp, npy_intp);
++PYWASI_INSTANTIATE(int16_t)
++PYWASI_INSTANTIATE(uint16_t)
++PYWASI_INSTANTIATE(int32_t)
++PYWASI_INSTANTIATE(uint32_t)
++PYWASI_INSTANTIATE(int64_t)
++PYWASI_INSTANTIATE(uint64_t)
++PYWASI_INSTANTIATE(float)
++PYWASI_INSTANTIATE(double)
++#undef PYWASI_INSTANTIATE
++
++template bool ArgQSortWasm<int32_t>(int32_t *, npy_intp *, npy_intp);
++template bool ArgQSortWasm<uint32_t>(uint32_t *, npy_intp *, npy_intp);
++template bool ArgQSortWasm<float>(float *, npy_intp *, npy_intp);
++template bool ArgQSortWasm<double>(double *, npy_intp *, npy_intp);
 +}  // namespace np::highway::qsort_simd
 +#endif
+diff --color -ruN a/numpy/_core/src/npysort/quicksort.hpp b/numpy/_core/src/npysort/quicksort.hpp
 --- a/numpy/_core/src/npysort/quicksort.hpp
 +++ b/numpy/_core/src/npysort/quicksort.hpp
-@@ -48,7 +48,9 @@
+@@ -37,7 +37,11 @@
+         using TF = typename np::meta::FixedWidth<T>::Type;
+         void (*dispfunc)(TF*, intptr_t, bool) = nullptr;
+         if constexpr (sizeof(T) == sizeof(uint16_t)) {
+-        #if defined(NPY_CPU_AMD64) || defined(NPY_CPU_X86) // x86 32-bit and 64-bit
++        #if defined(__wasm_simd128__)
++            if constexpr (std::is_integral_v<TF>) {
++                dispfunc = np::highway::qsort_simd::template QSortWasm<TF>;
++            }
++        #elif defined(NPY_CPU_AMD64) || defined(NPY_CPU_X86) // x86 32-bit and 64-bit
+             if constexpr (!reverse) { // x86 SIMD sort is ascending-only
+                 #include "x86_simd_qsort_16bit.dispatch.h"
+                 NPY_CPU_DISPATCH_CALL_XB(dispfunc = np::qsort_simd::template QSort, <TF>);
+@@ -48,7 +52,9 @@
          #endif
          }
          else if constexpr (sizeof(T) == sizeof(uint32_t) || sizeof(T) == sizeof(uint64_t)) {
@@ -93,3 +237,52 @@ toolchain/recipes.toml.
              if constexpr (!reverse) { // x86 SIMD sort is ascending-only
                  #include "x86_simd_qsort.dispatch.h"
                  NPY_CPU_DISPATCH_CALL_XB(dispfunc = np::qsort_simd::template QSort, <TF>);
+@@ -79,6 +85,15 @@
+         && !reverse // x86 SIMD argsort is ascending-only
+     ) {
+         using TF = typename np::meta::FixedWidth<T>::Type;
++        #if defined(__wasm_simd128__)
++        // 64-bit keys need 128-bit key-value lanes, which only beat the
++        // scalar argsort for floats.
++        if constexpr (sizeof(T) == sizeof(uint32_t) ||
++                      (sizeof(T) == sizeof(uint64_t) && std::is_floating_point_v<TF>)) {
++            return np::highway::qsort_simd::template ArgQSortWasm<TF>(
++                reinterpret_cast<TF*>(start), arg, num);
++        }
++        #endif
+         void (*dispfunc)(TF*, npy_intp*, npy_intp, bool) = nullptr;
+         if constexpr (sizeof(T) == sizeof(uint32_t) || sizeof(T) == sizeof(uint64_t)) {
+             #include "x86_simd_argsort.dispatch.h"
+diff --color -ruN a/numpy/_core/src/npysort/selection.cpp b/numpy/_core/src/npysort/selection.cpp
+--- a/numpy/_core/src/npysort/selection.cpp
++++ b/numpy/_core/src/npysort/selection.cpp
+@@ -26,6 +26,9 @@
+ #include <cstdlib>
+ #include <utility>
+ #include "x86_simd_qsort.hpp"
++#if defined(__wasm_simd128__)
++#include "highway_qsort.hpp"
++#endif
+ 
+ #define NOT_USED NPY_UNUSED(unused)
+ #define DISABLE_HIGHWAY_OPTIMIZATION (defined(__arm__) || defined(__aarch64__))
+@@ -43,6 +46,11 @@
+         (sizeof(T) == sizeof(uint16_t) || sizeof(T) == sizeof(uint32_t) || sizeof(T) == sizeof(uint64_t))) {
+         using TF = typename np::meta::FixedWidth<T>::Type;
+         void (*dispfunc)(TF*, npy_intp, npy_intp) = nullptr;
++        #if defined(__wasm_simd128__)
++        if constexpr (!std::is_same_v<T, np::Half>) {
++            dispfunc = np::highway::qsort_simd::template QSelectWasm<TF>;
++        }
++        #else
+         if constexpr (sizeof(T) == sizeof(uint16_t)) {
+             #include "x86_simd_qsort_16bit.dispatch.h"
+             NPY_CPU_DISPATCH_CALL_XB(dispfunc = np::qsort_simd::template QSelect, <TF>);
+@@ -51,6 +59,7 @@
+             #include "x86_simd_qsort.dispatch.h"
+             NPY_CPU_DISPATCH_CALL_XB(dispfunc = np::qsort_simd::template QSelect, <TF>);
+         }
++        #endif
+         if (dispfunc) {
+             (*dispfunc)(reinterpret_cast<TF*>(v), num, kth);
+             return true;
