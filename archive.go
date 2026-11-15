@@ -7,7 +7,6 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
-	"net/http"
 	"os"
 	"path"
 	"path/filepath"
@@ -254,28 +253,9 @@ func untarZstd(r io.Reader, dir string) error {
 	}
 }
 
-func httpGet(ctx context.Context, url, accept string) (io.ReadCloser, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-	if err != nil {
-		return nil, err
-	}
-	if accept != "" {
-		req.Header.Set("Accept", accept)
-	}
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	if resp.StatusCode != http.StatusOK {
-		resp.Body.Close()
-		return nil, fmt.Errorf("GET %s: %s", url, resp.Status)
-	}
-	return resp.Body, nil
-}
-
 // DefaultArchive is the interpreter New uses without WithHome,
 // WithDependencies or WithArchive when there is none at DefaultHome: CPython
-// with only the standard library, embedded in this package (about 7 MiB),
+// with only the standard library, embedded in this package (about 9 MiB),
 // so it works offline and without a download. It is unpacked into the
 // user cache directory on first use.
 var DefaultArchive Source = ArchiveBytes(stdlib.Archive)
