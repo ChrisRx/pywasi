@@ -239,3 +239,81 @@ except urllib.error.URLError as e:
 		t.Fatalf("exit %d, output %q\nstderr:\n%s", code, out, errOut)
 	}
 }
+
+func TestAsyncio(t *testing.T) {
+	ctx := context.Background()
+
+	// Without network access: the event loop's wakeup socketpair, executors
+	// (run inline) and asyncio.run's executor shutdown.
+	got, err := pywasi.Eval[[]any](ctx, `
+import asyncio, socket, time
+
+async def main():
+    await asyncio.sleep(0.01)
+    a = await asyncio.to_thread(sum, [1, 2, 3])
+    b = await asyncio.get_running_loop().run_in_executor(None, time.monotonic)
+    return [a, b > 0]
+
+a, b = socket.socketpair()
+a.sendall(b"ping")
+[asyncio.run(main()), b.recv(4).decode()]
+`, pywasi.WithArchive(pywasi.DefaultArchive))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fmt.Sprint(got) != "[[6 true] ping]" {
+		t.Fatalf("got %v", got)
+	}
+
+	// With it: a connection by host name, resolved in the executor.
+	srv, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = srv.Close() }()
+	go func() {
+		c, err := srv.Accept()
+		if err != nil {
+			return
+		}
+		_, _ = c.Write([]byte("hello"))
+		_ = c.Close()
+	}()
+	port := srv.Addr().(*net.TCPAddr).Port
+	reply, err := pywasi.Eval[string](ctx, fmt.Sprintf(`
+import asyncio, socket
+
+async def main():
+    r, w = await asyncio.open_connection("localhost", %d, family=socket.AF_INET)
+    data = await r.read()
+    w.close()
+    return data.decode()
+
+asyncio.run(main())
+`, port), pywasi.WithArchive(pywasi.DefaultArchive), pywasi.WithNetwork(nil))
+	if err != nil || reply != "hello" {
+		t.Fatalf("got %q, %v", reply, err)
+	}
+}
+
+func TestIPv6(t *testing.T) {
+	if ln, err := net.Listen("tcp6", "[::1]:0"); err != nil {
+		t.Skip("no IPv6 loopback:", err)
+	} else {
+		_ = ln.Close()
+	}
+	got, err := pywasi.Eval[[]any](context.Background(), `
+import socket
+s = socket.create_server(("::1", 0), family=socket.AF_INET6)
+c = socket.create_connection(("::1", s.getsockname()[1]))
+a, peer = s.accept()
+c.sendall(b"v6")
+[a.recv(2).decode(), peer[0], socket.getaddrinfo("localhost", 80, socket.AF_INET6)[0][4][0]]
+`, pywasi.WithArchive(pywasi.DefaultArchive), pywasi.WithNetwork(nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fmt.Sprint(got) != "[v6 ::1 ::1]" {
+		t.Fatalf("got %v", got)
+	}
+}

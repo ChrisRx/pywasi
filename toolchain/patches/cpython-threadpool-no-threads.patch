@@ -1,0 +1,86 @@
+--- a/Lib/asyncio/base_events.py
++++ b/Lib/asyncio/base_events.py
+@@ -605,7 +605,13 @@
+             return
+         future = self.create_future()
+         thread = threading.Thread(target=self._do_shutdown, args=(future,))
+-        thread.start()
++        try:
++            thread.start()
++        except RuntimeError:
++            # No threads (WASI): the executor ran its work inline, so there
++            # is nothing to wait for.
++            self._do_shutdown(future)
++            thread = None
+         try:
+             async with timeouts.timeout(timeout):
+                 await future
+@@ -615,7 +621,8 @@
+                           RuntimeWarning, stacklevel=2)
+             self._default_executor.shutdown(wait=False)
+         else:
+-            thread.join()
++            if thread is not None:
++                thread.join()
+ 
+     def _do_shutdown(self, future):
+         try:
+--- a/Lib/concurrent/futures/thread.py
++++ b/Lib/concurrent/futures/thread.py
+@@ -213,10 +213,39 @@
+ 
+             self._work_queue.put(w)
+             self._adjust_thread_count()
+-            return f
++            if not self._no_threads:
++                return f
++        # No threads (WASI): run the work now, outside the locks so that it
++        # can submit more.
++        self._run_inline()
++        return f
+     submit.__doc__ = _base.Executor.submit.__doc__
+ 
++    _no_threads = False
++    _inline_context = None
++
++    def _run_inline(self):
++        if self._inline_context is None:
++            context = self._create_worker_context()
++            try:
++                context.initialize()
++            except BaseException:
++                _base.LOGGER.critical('Exception in initializer:', exc_info=True)
++                self._initializer_failed()
++                return
++            self._inline_context = context
++        while True:
++            try:
++                work_item = self._work_queue.get_nowait()
++            except queue.Empty:
++                return
++            if work_item is not None:
++                work_item.run(self._inline_context)
++                del work_item
++
+     def _adjust_thread_count(self):
++        if self._no_threads:
++            return
+         # if idle threads are available, don't spin new threads
+         if self._idle_semaphore.acquire(timeout=0):
+             return
+@@ -234,7 +263,14 @@
+                                  args=(weakref.ref(self, weakref_cb),
+                                        self._create_worker_context(),
+                                        self._work_queue))
+-            t.start()
++            try:
++                t.start()
++            except RuntimeError:
++                # No threads (WASI): submit runs the work itself.
++                if num_threads:
++                    raise
++                self._no_threads = True
++                return
+             self._threads.add(t)
+             _threads_queues[t] = self._work_queue
+ 

@@ -66,8 +66,13 @@
               # Static C libraries for wasm32-wasip1 (nix/c-libs.nix).
               PYWASI_ZLIB = "${pywasiPkgs.zlib-wasi}";
               PYWASI_OPENSSL = "${pywasiPkgs.openssl}";
+              PYWASI_SQLITE = "${pywasiPkgs.sqlite}";
+              PYWASI_BZIP2 = "${pywasiPkgs.bzip2}";
+              PYWASI_XZ = "${pywasiPkgs.xz}";
               # CA certificates shipped with interpreters, for ssl.
               PYWASI_CACERT = "${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt";
+              # Time zone database shipped with interpreters, for zoneinfo.
+              PYWASI_ZONEINFO = "${pkgs.tzdata}/share/zoneinfo";
               PYWASI_SYSROOT = "${pywasiPkgs.sysroot}";
               UV_PYTHON = "${pkgs.python3}/bin/python3";
               UV_PYTHON_DOWNLOADS = "never";

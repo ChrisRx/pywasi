@@ -645,14 +645,31 @@ def host_stub() -> Path:
     return out
 
 
-def install_certs(home: Path):
-    """Ship CA certificates where OpenSSL looks for them (OPENSSLDIR is
-    /etc/ssl in the guest, and home is mounted at the guest root), so ssl
-    can verify servers. SSL_CERT_FILE overrides them."""
+def install_data(home: Path):
+    """Ship the data files C libraries and the stdlib look for at fixed
+    paths (home is mounted at the guest root):
+
+    - CA certificates where OpenSSL looks for them (OPENSSLDIR is /etc/ssl),
+      so ssl can verify servers. SSL_CERT_FILE overrides them.
+    - The time zone database where zoneinfo looks for it (--with-tzpath in
+      scripts/build-python.sh), without the posix/ and right/ copies.
+    """
     certs = home / "etc" / "ssl" / "cert.pem"
     certs.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy(os.environ["PYWASI_CACERT"], certs)
     certs.chmod(0o644)
+    zoneinfo = home / "share" / "zoneinfo"
+    if zoneinfo.exists():
+        shutil.rmtree(zoneinfo)
+    shutil.copytree(
+        os.environ["PYWASI_ZONEINFO"],
+        zoneinfo,
+        ignore=shutil.ignore_patterns("posix", "right"),
+        copy_function=shutil.copyfile,
+    )
+    # copytree keeps the Nix store's read-only directory modes.
+    for d in [zoneinfo, *(p for p in zoneinfo.rglob("*") if p.is_dir())]:
+        d.chmod(0o755)
 
 
 def snapshot(home: Path, preload: list[str]):
@@ -808,7 +825,7 @@ def main():
         lib = out / "lib" / target.stdlib.name
         shutil.copytree(target.stdlib, lib, ignore=STDLIB_IGNORE)
         install_support(lib)
-        install_certs(out)
+        install_data(out)
         shutil.copytree(site, lib / "site-packages")
         scrub_paths(lib)
         compile_bytecode(lib, out)
@@ -880,6 +897,7 @@ def write_kit(linked: Linked, lib: Path, target: Target, abi: str, archive: Path
         link/       every file the command reads, at /kit/link/... in args
         lib/        the standard library, as in an interpreter home
         etc/        CA certificates (etc/ssl/cert.pem), likewise
+        share/      the time zone database (share/zoneinfo), likewise
     """
     stage = Path(tempfile.mkdtemp(prefix="pywasi-kit-", dir=ROOT / "build"))
     try:
@@ -922,8 +940,9 @@ def write_kit(linked: Linked, lib: Path, target: Target, abi: str, archive: Path
         link_json = {"version": 1, "abi": abi, "python": target.markers["python_full_version"], "args": args}
         (stage / "link.json").write_text(json.dumps(link_json, indent=2) + "\n")
         shutil.copytree(lib, stage / "lib" / lib.name, ignore=shutil.ignore_patterns("site-packages"))
-        # CA certificates (install_certs), at the same place in linked homes.
-        shutil.copytree(lib.parent.parent / "etc", stage / "etc")
+        # Data files (install_data), at the same place in linked homes.
+        for d in "etc", "share":
+            shutil.copytree(lib.parent.parent / d, stage / d)
         digest = write_archive(stage, archive)
         log(f"kit: {archive} ({archive.stat().st_size / 2**20:.1f} MiB, abi {abi}, sha256:{digest})")
     finally:

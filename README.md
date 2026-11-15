@@ -95,7 +95,7 @@ python, and `-net=false` turns that off (see [Network](#network)). From Go, `Run
 
 With no interpreter options, `New` uses `$PYWASI_HOME` or `./.pywasi` if
 one exists, and otherwise the standard library interpreter embedded in the
-package (`pywasi.DefaultArchive`, about 8 MiB). Everything is cached under
+package (`pywasi.DefaultArchive`, about 9 MiB). Everything is cached under
 `os.UserCacheDir()/pywasi` (or `$PYWASI_CACHE`).
 
 ## Network
@@ -128,11 +128,16 @@ socket or sleeps.
 `nix/openssl-wasi.nix`. TLS runs inside the guest. Interpreters ship
 Mozilla's CA certificates (from nixpkgs' cacert) at `/etc/ssl/cert.pem`,
 OpenSSL's default, so certificates are verified as usual; `SSL_CERT_FILE` or
-`cafile=` point elsewhere.
+`cafile=` point elsewhere. Likewise, the time zone database (nixpkgs'
+tzdata) ships at `/share/zoneinfo` for `zoneinfo`.
 
 There are no threads, so `socketserver`'s threading servers (and
-`python -m http.server`) handle one request at a time. Only TCP is
-supported, and `connect` doesn't time out with the socket's timeout.
+`python -m http.server`) handle one request at a time, and a
+`ThreadPoolExecutor` runs its work inline in `submit`. asyncio works,
+including `to_thread` and host name lookups, but those block the event
+loop while they run. `socket.socketpair` (asyncio's wakeup channel) works
+without network access. Only TCP is supported, and `connect` doesn't time
+out with the socket's timeout.
 
 An interpreter linked by pywasi imports these host functions, so to run it
 under wasmtime, preload stubs that fail them: `wasmtime run --preload
@@ -462,8 +467,14 @@ Native numpy uses AVX2/AVX-512 kernels for matmul and sort, and wasm SIMD is
 
 - No Rust extensions (maturin) yet.
 - C libraries a package needs must be added to `nix/c-libs.nix` first. zlib,
-  OpenSSL, libyaml and OpenBLAS are there now.
-- No threads (WASI preview 1), so BLAS runs single-threaded.
+  OpenSSL, SQLite, bzip2, xz, libyaml and OpenBLAS are there now.
+- No threads (WASI preview 1), so BLAS runs single-threaded, and
+  `threading.Thread.start` raises `RuntimeError`.
+- Modules WASI can't support are missing (`ctypes`, `mmap`, `fcntl`,
+  `termios`, `readline`, `curses`, `resource`, `pwd`, `grp`), and
+  `subprocess` and `multiprocessing` can't start processes.
+- SQLite has no file locking or WAL mode, so don't share a database file
+  between processes.
 - C++ exceptions abort instead of unwinding.
 - wasm has no floating-point exception flags. numpy's explicit errors work
   through a patch (singular matrices raise `LinAlgError`, and integer division

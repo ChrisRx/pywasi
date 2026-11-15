@@ -27,6 +27,7 @@ extern "C" {
 #endif
 
 int socket(int, int, int);
+int socketpair(int, int, int, int[2]);
 int bind(int, const struct sockaddr *, socklen_t);
 int listen(int, int);
 int connect(int, const struct sockaddr *, socklen_t);

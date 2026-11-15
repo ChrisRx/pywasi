@@ -205,3 +205,38 @@ func TestWorkingDirectory(t *testing.T) {
 		t.Error("relative Dir: expected an error")
 	}
 }
+
+// TestStdlibModules checks the stdlib modules that need C libraries or data
+// files the interpreter ships.
+func TestStdlibModules(t *testing.T) {
+	got, err := pywasi.Eval[[]any](context.Background(), `
+import bz2, lzma, sqlite3, zlib, hashlib, ssl, datetime, zoneinfo
+
+db = sqlite3.connect("/data/test.db")
+db.execute("create table t (x)")
+db.executemany("insert into t values (?)", [(1,), (2,)])
+db.commit()
+total = db.execute("select sum(x) from t").fetchone()[0]
+db.close()
+
+data = b"pywasi " * 100
+ny = datetime.datetime(2026, 7, 1, 12, tzinfo=zoneinfo.ZoneInfo("America/New_York"))
+[
+    total,
+    bz2.decompress(bz2.compress(data)) == data,
+    lzma.decompress(lzma.compress(data)) == data,
+    zlib.decompress(zlib.compress(data)) == data,
+    hashlib.sha256(data).hexdigest()[:8],
+    ny.utcoffset().total_seconds() / 3600,
+    sqlite3.sqlite_version,
+]
+`, pywasi.WithArchive(pywasi.DefaultArchive), pywasi.WithRunOptions(pywasi.RunOptions{
+		Mounts: []pywasi.Mount{{Host: t.TempDir(), Guest: "/data"}},
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fmt.Sprint(got) != "[3 true true true 4bfadcb1 -4 3.54.0]" {
+		t.Fatalf("got %v", got)
+	}
+}

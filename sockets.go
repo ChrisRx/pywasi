@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"syscall"
+	"time"
 
 	"github.com/ChrisRx/wazero"
 	"github.com/ChrisRx/wazero/api"
@@ -137,6 +138,7 @@ func instantiateHost(ctx context.Context, r wazero.Runtime, n network) error {
 		{"sock_setopt", h.setopt, 3},
 		{"sock_resolve", h.resolve, 9},
 		{"sock_lookup", h.lookup, 4},
+		{"sock_pair", h.pair, 3},
 	} {
 		params := make([]api.ValueType, f.params)
 		for i := range params {
@@ -357,6 +359,68 @@ func (h sockets) connect(ctx context.Context, mod api.Module, stack []uint64) {
 		}
 		return 0
 	}()))
+}
+
+// pair makes a connected pair of sockets for socketpair, from loopback
+// TCP. It is internal to the process, so it needs no network access.
+func (h sockets) pair(_ context.Context, mod api.Module, stack []uint64) {
+	family, nonblock, out := int32(stack[0]), uint32(stack[1]) != 0, uint32(stack[2])
+	stack[0] = uint64(uint32(func() int32 {
+		a, b, err := loopbackPair(family)
+		if err != nil {
+			return errnoOf(err)
+		}
+		var fds [2]int32
+		for i, c := range []*net.TCPConn{a, b} {
+			fd, err := sock.Open(mod, &pendingSocket{family: family, nonblock: nonblock})
+			if err == nil {
+				err = sock.Attach(mod, fd, c)
+			}
+			if err != nil {
+				_ = a.Close()
+				_ = b.Close()
+				return errnoIO
+			}
+			fds[i] = fd
+		}
+		if !mod.Memory().WriteUint32Le(out, uint32(fds[0])) || !mod.Memory().WriteUint32Le(out+4, uint32(fds[1])) {
+			return errnoInval
+		}
+		return 0
+	}()))
+}
+
+// loopbackPair connects two TCP sockets over loopback. The listener lives
+// only until its first connection from the dialing socket, and anything
+// else that connects meanwhile is dropped.
+func loopbackPair(family int32) (*net.TCPConn, *net.TCPConn, error) {
+	network, ip := "tcp4", net.IPv4(127, 0, 0, 1)
+	if family == 6 {
+		network, ip = "tcp6", net.IPv6loopback
+	}
+	ln, err := net.ListenTCP(network, &net.TCPAddr{IP: ip})
+	if err != nil {
+		return nil, nil, err
+	}
+	defer func() { _ = ln.Close() }()
+	if err := ln.SetDeadline(time.Now().Add(10 * time.Second)); err != nil {
+		return nil, nil, err
+	}
+	a, err := net.DialTCP(network, nil, ln.Addr().(*net.TCPAddr))
+	if err != nil {
+		return nil, nil, err
+	}
+	for {
+		b, err := ln.AcceptTCP()
+		if err != nil {
+			_ = a.Close()
+			return nil, nil, err
+		}
+		if b.RemoteAddr().String() == a.LocalAddr().String() {
+			return a, b, nil
+		}
+		_ = b.Close()
+	}
 }
 
 func (h sockets) addr(_ context.Context, mod api.Module, stack []uint64) {

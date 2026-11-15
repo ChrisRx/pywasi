@@ -68,6 +68,7 @@ HOST(setopt, (int32_t fd, int32_t opt, int32_t value))
 HOST(resolve, (const char *host, int32_t host_len, const char *service, int32_t service_len,
                int32_t family, int32_t flags, wire_addr *addrs, int32_t cap, int32_t *n))
 HOST(lookup, (const wire_addr *addr, char *name, int32_t cap, int32_t *len))
+HOST(pair, (int32_t family, int32_t nonblock, int32_t *fds))
 
 static int fail(int32_t err) {
     errno = err;
@@ -141,6 +142,21 @@ int socket(int domain, int type, int protocol) {
     }
     if ((err = host_open(family, kind, nonblock, &fd))) return fail(err);
     return fd;
+}
+
+/* A connected pair, for wakeups within the process (asyncio's self-pipe).
+ * The host makes it from loopback TCP, which needs no network access, so
+ * AF_UNIX gets one too. */
+int socketpair(int domain, int type, int protocol, int fds[2]) {
+    int nonblock = (type & SOCK_NONBLOCK) != 0;
+    int32_t out[2], err;
+    type &= ~(SOCK_NONBLOCK | SOCK_CLOEXEC);
+    if (domain != AF_UNIX && domain != AF_INET && domain != AF_INET6) return fail(EAFNOSUPPORT);
+    if (type != SOCK_STREAM || (protocol != 0 && protocol != IPPROTO_TCP)) return fail(EPROTONOSUPPORT);
+    if ((err = host_pair(domain == AF_INET6 ? 6 : 4, nonblock, out))) return fail(err);
+    fds[0] = out[0];
+    fds[1] = out[1];
+    return 0;
 }
 
 int bind(int fd, const struct sockaddr *addr, socklen_t len) {
