@@ -64,20 +64,25 @@ const (
 	errnoAddrinuse    int32 = 3
 	errnoAddrnotavail int32 = 4
 	errnoAfnosupport  int32 = 5
+	errnoAgain        int32 = 6
 	errnoBadf         int32 = 8
 	errnoConnaborted  int32 = 13
 	errnoConnrefused  int32 = 14
 	errnoConnreset    int32 = 15
+	errnoDestaddrreq  int32 = 17
 	errnoHostunreach  int32 = 23
 	errnoIntr         int32 = 27
 	errnoInval        int32 = 28
 	errnoIO           int32 = 29
 	errnoIsconn       int32 = 30
+	errnoMsgsize      int32 = 35
 	errnoNetdown      int32 = 38
 	errnoNetunreach   int32 = 40
 	errnoNoprotoopt   int32 = 50
+	errnoNosys        int32 = 52
 	errnoNotconn      int32 = 53
 	errnoNotsock      int32 = 57
+	errnoNotsup       int32 = 58
 	errnoPerm         int32 = 63
 	errnoProtonosupp  int32 = 66
 	errnoTimedout     int32 = 73
@@ -139,6 +144,8 @@ func instantiateHost(ctx context.Context, r wazero.Runtime, n network) error {
 		{"sock_resolve", h.resolve, 9},
 		{"sock_lookup", h.lookup, 4},
 		{"sock_pair", h.pair, 3},
+		{"sock_sendto", h.sendto, 6},
+		{"sock_recvfrom", h.recvfrom, 6},
 	} {
 		params := make([]api.ValueType, f.params)
 		for i := range params {
@@ -158,6 +165,7 @@ type sockets struct {
 type pendingSocket struct {
 	experimentalsys.UnimplementedFile
 	family   int32 // 4 or 6
+	dgram    bool  // UDP, else TCP
 	nonblock bool
 	// listener is bound by bind, and becomes the socket on listen.
 	listener *net.TCPListener
@@ -191,10 +199,37 @@ func (s *pendingSocket) Close() experimentalsys.Errno {
 }
 
 func (s *pendingSocket) network() string {
-	if s.family == 6 {
-		return "tcp6"
+	proto := "tcp"
+	if s.dgram {
+		proto = "udp"
 	}
-	return "tcp4"
+	if s.family == 6 {
+		return proto + "6"
+	}
+	return proto + "4"
+}
+
+// listenUDP binds a UDP socket to addr. A wildcard IPv6 socket receives
+// IPv4 too, as on Linux, unless IPV6_V6ONLY is set.
+func (s *pendingSocket) listenUDP(addr netip.AddrPort) (*net.UDPConn, error) {
+	network := s.network()
+	if s.family == 6 && addr.Addr().IsUnspecified() && s.opts[optV6Only] == 0 {
+		network = "udp"
+	}
+	lc := net.ListenConfig{Control: s.control}
+	c, err := lc.ListenPacket(context.Background(), network, addr.String())
+	if err != nil {
+		return nil, err
+	}
+	return c.(*net.UDPConn), nil
+}
+
+// wildcard is the address for binding s to any port.
+func (s *pendingSocket) wildcard() netip.AddrPort {
+	if s.family == 6 {
+		return netip.AddrPortFrom(netip.IPv6Unspecified(), 0)
+	}
+	return netip.AddrPortFrom(netip.IPv4Unspecified(), 0)
 }
 
 // control applies the options set so far to a new host socket.
@@ -222,14 +257,14 @@ func (h sockets) open(ctx context.Context, mod api.Module, stack []uint64) {
 		if family != 4 && family != 6 {
 			return errnoAfnosupport
 		}
-		if kind != 1 { // TCP only, for now.
+		if kind != 1 && kind != 2 { // TCP or UDP
 			return errnoProtonosupp
 		}
 		if !h.net.enabled {
 			noteDisabled(ctx)
 			return errnoAcces
 		}
-		fd, err := sock.Open(mod, &pendingSocket{family: family, nonblock: nonblock, opts: map[int32]int32{}})
+		fd, err := sock.Open(mod, &pendingSocket{family: family, dgram: kind == 2, nonblock: nonblock, opts: map[int32]int32{}})
 		if err != nil {
 			return errnoIO
 		}
@@ -254,6 +289,8 @@ func pending(mod api.Module, fd int32) (*pendingSocket, int32) {
 		return nil, errnoInval
 	case *net.TCPConn:
 		return nil, errnoIsconn
+	case *net.UDPConn:
+		return nil, errnoInval // Bound.
 	}
 	return nil, errnoNotsock
 }
@@ -274,6 +311,17 @@ func (h sockets) bind(ctx context.Context, mod api.Module, stack []uint64) {
 		}
 		if addr.Addr().Is4() != (s.family == 4) {
 			return errnoAfnosupport
+		}
+		if s.dgram {
+			// A bound UDP socket is ready to send and receive.
+			if errno := h.net.check(ctx, "listen", addr.String()); errno != 0 {
+				return errno
+			}
+			c, err := s.listenUDP(addr)
+			if err != nil {
+				return errnoOf(err)
+			}
+			return attach(mod, fd, c)
 		}
 		return h.bindTo(ctx, s, addr)
 	}()))
@@ -301,6 +349,9 @@ func (h sockets) bindTo(ctx context.Context, s *pendingSocket, addr netip.AddrPo
 func (h sockets) listen(ctx context.Context, mod api.Module, stack []uint64) {
 	fd := int32(stack[0])
 	stack[0] = uint64(uint32(func() int32 {
+		if f, _ := sock.Lookup(mod, fd); isUDP(f) {
+			return errnoNotsup
+		}
 		s, errno := pending(mod, fd)
 		if errno == errnoInval {
 			return 0 // Already listening.
@@ -328,6 +379,9 @@ func (h sockets) listen(ctx context.Context, mod api.Module, stack []uint64) {
 func (h sockets) connect(ctx context.Context, mod api.Module, stack []uint64) {
 	fd, addrPtr := int32(stack[0]), uint32(stack[1])
 	stack[0] = uint64(uint32(func() int32 {
+		if f, _ := sock.Lookup(mod, fd); isUDP(f) {
+			return h.connectUDP(ctx, mod, fd, f, addrPtr)
+		}
 		s, errno := pending(mod, fd)
 		if errno == errnoInval {
 			return errnoIsconn // A listener.
@@ -359,6 +413,145 @@ func (h sockets) connect(ctx context.Context, mod api.Module, stack []uint64) {
 		}
 		return 0
 	}()))
+}
+
+// connectUDP sets the destination of a UDP socket, binding it first if
+// needed.
+func (h sockets) connectUDP(ctx context.Context, mod api.Module, fd int32, f any, addrPtr uint32) int32 {
+	addr, ok := readAddr(mod, addrPtr)
+	if !ok {
+		return errnoInval
+	}
+	if errno := h.net.check(ctx, "connect", addr.String()); errno != 0 {
+		return errno
+	}
+	if c, ok := f.(*net.UDPConn); ok {
+		return connectRaw(c, addr)
+	}
+	s := f.(*pendingSocket)
+	d := net.Dialer{Control: s.control}
+	c, err := d.DialContext(ctx, s.network(), addr.String())
+	if err != nil {
+		return errnoOf(err)
+	}
+	return attach(mod, fd, c)
+}
+
+// udpConn is the host socket of a UDP socket, which is bound to any port
+// first if it isn't yet, as POSIX does on sending.
+func udpConn(mod api.Module, fd int32) (*net.UDPConn, int32) {
+	f, ok := sock.Lookup(mod, fd)
+	if !ok {
+		return nil, errnoBadf
+	}
+	switch f := f.(type) {
+	case *net.UDPConn:
+		return f, 0
+	case *pendingSocket:
+		if !f.dgram {
+			return nil, errnoNotconn
+		}
+		c, err := f.listenUDP(f.wildcard())
+		if err != nil {
+			return nil, errnoOf(err)
+		}
+		if errno := attach(mod, fd, c); errno != 0 {
+			return nil, errno
+		}
+		return c, 0
+	case *net.TCPConn, *net.TCPListener:
+		return nil, errnoIsconn
+	}
+	return nil, errnoNotsock
+}
+
+// Flags of sock_sendto and sock_recvfrom.
+const (
+	dgramPeek     = 1
+	dgramDontWait = 2
+)
+
+// sendto sends a datagram to an address, which the policy checks as
+// "connect".
+func (h sockets) sendto(ctx context.Context, mod api.Module, stack []uint64) {
+	fd, buf, n, flags := int32(stack[0]), uint32(stack[1]), uint32(stack[2]), int32(stack[3])
+	addrPtr, sentPtr := uint32(stack[4]), uint32(stack[5])
+	stack[0] = uint64(uint32(func() int32 {
+		addr, ok := readAddr(mod, addrPtr)
+		if !ok {
+			return errnoInval
+		}
+		data, ok := mod.Memory().Read(buf, n)
+		if !ok {
+			return errnoInval
+		}
+		if errno := h.net.check(ctx, "connect", addr.String()); errno != 0 {
+			return errno
+		}
+		c, errno := udpConn(mod, fd)
+		if errno != 0 {
+			return errno
+		}
+		sent, errno := dgramSend(ctx, mod, c, data, addr, flags)
+		if errno != 0 {
+			return errno
+		}
+		if !mod.Memory().WriteUint32Le(sentPtr, uint32(sent)) {
+			return errnoInval
+		}
+		return 0
+	}()))
+}
+
+// recvfrom receives a datagram and the address it came from, or data and
+// the peer address on a TCP connection.
+func (h sockets) recvfrom(ctx context.Context, mod api.Module, stack []uint64) {
+	fd, buf, n, flags := int32(stack[0]), uint32(stack[1]), uint32(stack[2]), int32(stack[3])
+	addrPtr, nPtr := uint32(stack[4]), uint32(stack[5])
+	stack[0] = uint64(uint32(func() int32 {
+		data, ok := mod.Memory().Read(buf, n)
+		if !ok {
+			return errnoInval
+		}
+		var c syscall.Conn
+		if f, ok := sock.Lookup(mod, fd); !ok {
+			return errnoBadf
+		} else if tc, ok := f.(*net.TCPConn); ok {
+			c = tc
+		} else {
+			uc, errno := udpConn(mod, fd)
+			if errno != 0 {
+				return errno
+			}
+			c = uc
+		}
+		got, from, errno := dgramRecv(ctx, mod, c, data, flags)
+		if errno != 0 {
+			return errno
+		}
+		if !writeAddr(mod, addrPtr, from) || !mod.Memory().WriteUint32Le(nPtr, uint32(got)) {
+			return errnoInval
+		}
+		return 0
+	}()))
+}
+
+func isUDP(f any) bool {
+	switch f := f.(type) {
+	case *net.UDPConn:
+		return true
+	case *pendingSocket:
+		return f.dgram
+	}
+	return false
+}
+
+func attach(mod api.Module, fd int32, conn interface{ Close() error }) int32 {
+	if err := sock.Attach(mod, fd, conn); err != nil {
+		_ = conn.Close()
+		return errnoIO
+	}
+	return 0
 }
 
 // pair makes a connected pair of sockets for socketpair, from loopback
@@ -454,6 +647,17 @@ func (h sockets) addr(_ context.Context, mod api.Module, stack []uint64) {
 			} else {
 				a = f.LocalAddr()
 			}
+		case *net.UDPConn:
+			if peer {
+				// Connected after binding, which Go doesn't know of.
+				ap, errno := peerAddr(f)
+				if errno != 0 {
+					return errno
+				}
+				a = net.TCPAddrFromAddrPort(ap)
+			} else {
+				a = net.TCPAddrFromAddrPort(f.LocalAddr().(*net.UDPAddr).AddrPort())
+			}
 		default:
 			return errnoNotsock
 		}
@@ -478,6 +682,9 @@ func (h sockets) getopt(_ context.Context, mod api.Module, stack []uint64) {
 			v = 0 // connect is synchronous.
 		case optType:
 			v = 1
+			if isUDP(f) {
+				v = 2
+			}
 		case optDomain:
 			v = 4
 			if a, ok := sockAddr(f); ok && !a.Addr().Unmap().Is4() {
@@ -543,6 +750,8 @@ func sockAddr(f any) (netip.AddrPort, bool) {
 		return f.Addr().(*net.TCPAddr).AddrPort(), true
 	case *net.TCPConn:
 		return f.LocalAddr().(*net.TCPAddr).AddrPort(), true
+	case *net.UDPConn:
+		return f.LocalAddr().(*net.UDPAddr).AddrPort(), true
 	}
 	return netip.AddrPort{}, false
 }

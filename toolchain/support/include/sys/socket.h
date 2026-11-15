@@ -25,9 +25,17 @@ extern "C" {
 #ifndef SOMAXCONN
 #define SOMAXCONN 128
 #endif
+#ifndef MSG_DONTWAIT
+#define MSG_DONTWAIT 0x0040
+#endif
+#ifndef MSG_NOSIGNAL
+#define MSG_NOSIGNAL 0x4000
+#endif
 
 int socket(int, int, int);
 int socketpair(int, int, int, int[2]);
+ssize_t sendto(int, const void *, size_t, int, const struct sockaddr *, socklen_t);
+ssize_t recvfrom(int, void *__restrict, size_t, int, struct sockaddr *__restrict, socklen_t *__restrict);
 int bind(int, const struct sockaddr *, socklen_t);
 int listen(int, int);
 int connect(int, const struct sockaddr *, socklen_t);

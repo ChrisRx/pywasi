@@ -12,6 +12,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -315,5 +316,115 @@ c.sendall(b"v6")
 	}
 	if fmt.Sprint(got) != "[v6 ::1 ::1]" {
 		t.Fatalf("got %v", got)
+	}
+}
+
+func TestUDP(t *testing.T) {
+	// A Go echo server.
+	echo, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = echo.Close() }()
+	go func() {
+		buf := make([]byte, 1500)
+		for {
+			n, from, err := echo.ReadFromUDP(buf)
+			if err != nil {
+				return
+			}
+			_, _ = echo.WriteToUDP(append([]byte("echo "), buf[:n]...), from)
+		}
+	}()
+	port := echo.LocalAddr().(*net.UDPAddr).Port
+
+	var ops []string
+	var mu sync.Mutex
+	policy := func(op, address string) error {
+		mu.Lock()
+		defer mu.Unlock()
+		ops = append(ops, op+" "+address)
+		if address == "127.0.0.2:9" {
+			return errors.New("no")
+		}
+		return nil
+	}
+	got, err := pywasi.Eval[[]any](context.Background(), fmt.Sprintf(`
+import asyncio, socket
+port = %d
+out = []
+
+# sendto and recvfrom, bound on the first send.
+s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+s.settimeout(5)
+s.sendto(b"one", ("127.0.0.1", port))
+data, addr = s.recvfrom(100)
+out += [data.decode(), addr == ("127.0.0.1", port), s.getsockopt(socket.SOL_SOCKET, socket.SO_TYPE) == socket.SOCK_DGRAM]
+
+# Timeouts.
+s.settimeout(0.1)
+try:
+    s.recvfrom(100)
+except TimeoutError:
+    out.append("timeout")
+
+# Denied by the policy.
+try:
+    s.sendto(b"x", ("127.0.0.2", 9))
+except PermissionError:
+    out.append("denied")
+s.close()
+
+# connect, send and recv.
+c = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+c.connect(("127.0.0.1", port))
+c.send(b"two")
+out += [c.recv(100).decode(), c.getpeername() == ("127.0.0.1", port)]
+c.close()
+
+# Bound, then talking to itself, non-blocking.
+b = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+b.bind(("127.0.0.1", 0))
+b.setblocking(False)
+try:
+    b.recvfrom(100)
+except BlockingIOError:
+    out.append("would block")
+b.sendto(b"self", b.getsockname())
+out.append(b.recvfrom(100)[0].decode())
+b.close()
+
+# asyncio.
+class Client(asyncio.DatagramProtocol):
+    def __init__(self, done):
+        self.done = done
+    def connection_made(self, transport):
+        transport.sendto(b"three")
+    def datagram_received(self, data, addr):
+        self.done.set_result(data.decode())
+
+async def main():
+    done = asyncio.get_running_loop().create_future()
+    transport, _ = await asyncio.get_running_loop().create_datagram_endpoint(
+        lambda: Client(done), remote_addr=("127.0.0.1", port))
+    try:
+        return await asyncio.wait_for(done, 5)
+    finally:
+        transport.close()
+
+out.append(asyncio.run(main()))
+out
+`, port), pywasi.WithArchive(pywasi.DefaultArchive), pywasi.WithNetwork(policy))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "[echo one true true timeout denied echo two true would block self echo three]"
+	if fmt.Sprint(got) != want {
+		t.Fatalf("got %v\nwant %s", got, want)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if !slices.Contains(ops, "listen 127.0.0.1:0") || !slices.Contains(ops, fmt.Sprintf("connect 127.0.0.1:%d", port)) {
+		t.Errorf("policy saw %q", ops)
 	}
 }

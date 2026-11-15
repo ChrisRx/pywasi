@@ -34,12 +34,13 @@ type config struct {
 	network      network
 }
 
-// WithNetwork lets Python use sockets: listen on and connect to TCP
-// addresses, and resolve host names. allow, if not nil, decides each
-// operation: op is "listen" or "connect" with an address like
-// "127.0.0.1:8080" or "[::]:443", or "resolve" with a host name, a service
-// name ("https") or, for reverse lookups, an IP address. An error denies
-// it, and Python sees a PermissionError.
+// WithNetwork lets Python use sockets: TCP and UDP, and host name
+// resolution. allow, if not nil, decides each operation: op is "listen" or
+// "connect" with an address like "127.0.0.1:8080" or "[::]:443", or
+// "resolve" with a host name, a service name ("https") or, for reverse
+// lookups, an IP address. Binding a UDP socket is "listen", and connecting
+// one or sending a datagram is "connect", checked for every datagram. An
+// error denies it, and Python sees a PermissionError.
 //
 // Without WithNetwork, creating a socket or resolving a host name fails
 // with PermissionError. "localhost" and IP addresses still resolve.

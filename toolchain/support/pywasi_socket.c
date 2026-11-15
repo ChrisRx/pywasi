@@ -1,8 +1,8 @@
 /* Sockets for wasm32-wasip1: the calls wasi-libc leaves out there (socket,
- * bind, listen, connect, name resolution, ...), implemented by pywasi's
- * host functions (module "pywasi", see sockets.go). accept, recv, send,
- * shutdown and poll stay WASI calls, which work on the descriptors these
- * return.
+ * bind, listen, connect, sendto, recvfrom, name resolution, ...),
+ * implemented by pywasi's host functions (module "pywasi", see sockets.go).
+ * accept, recv, send, shutdown and poll stay WASI calls, which work on the
+ * descriptors these return, TCP and UDP.
  *
  * Built with -DPYWASI_SOCKET_STUB, the host functions fail with ENOSYS
  * instead, for an interpreter that runs without pywasi (such as under
@@ -10,6 +10,7 @@
  */
 #include <arpa/inet.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <netdb.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
@@ -69,6 +70,14 @@ HOST(resolve, (const char *host, int32_t host_len, const char *service, int32_t 
                int32_t family, int32_t flags, wire_addr *addrs, int32_t cap, int32_t *n))
 HOST(lookup, (const wire_addr *addr, char *name, int32_t cap, int32_t *len))
 HOST(pair, (int32_t family, int32_t nonblock, int32_t *fds))
+HOST(sendto, (int32_t fd, const void *buf, int32_t len, int32_t flags, const wire_addr *addr, int32_t *sent))
+HOST(recvfrom, (int32_t fd, void *buf, int32_t len, int32_t flags, wire_addr *addr, int32_t *n))
+
+/* Flags of sock_sendto and sock_recvfrom. */
+enum {
+    DGRAM_PEEK = 1,
+    DGRAM_DONTWAIT = 2,
+};
 
 static int fail(int32_t err) {
     errno = err;
@@ -185,6 +194,36 @@ static int sock_addr(int fd, int peer, struct sockaddr *addr, socklen_t *len) {
     if ((err = host_addr(fd, peer, &w))) return fail(err);
     from_wire(&w, addr, len);
     return 0;
+}
+
+/* The flags for sock_sendto or sock_recvfrom: the host waits unless the
+ * descriptor is non-blocking or the call says not to. */
+static int dgram_flags(int fd, int flags, int32_t *out) {
+    int fl;
+    if (flags & ~(MSG_PEEK | MSG_DONTWAIT | MSG_NOSIGNAL)) return EOPNOTSUPP;
+    *out = flags & MSG_PEEK ? DGRAM_PEEK : 0;
+    if ((fl = fcntl(fd, F_GETFL)) < 0) return errno;
+    if ((flags & MSG_DONTWAIT) || (fl & O_NONBLOCK)) *out |= DGRAM_DONTWAIT;
+    return 0;
+}
+
+ssize_t sendto(int fd, const void *buf, size_t len, int flags, const struct sockaddr *addr, socklen_t addrlen) {
+    wire_addr w;
+    int32_t f, sent, err;
+    if (!addr) return send(fd, buf, len, flags);
+    if ((err = to_wire(addr, addrlen, &w)) || (err = dgram_flags(fd, flags, &f))) return fail(err);
+    if ((err = host_sendto(fd, buf, len, f, &w, &sent))) return fail(err);
+    return sent;
+}
+
+ssize_t recvfrom(int fd, void *__restrict buf, size_t len, int flags, struct sockaddr *__restrict addr,
+                 socklen_t *__restrict addrlen) {
+    wire_addr w;
+    int32_t f, n, err;
+    if ((err = dgram_flags(fd, flags, &f))) return fail(err);
+    if ((err = host_recvfrom(fd, buf, len, f, &w, &n))) return fail(err);
+    if (addr && addrlen) from_wire(&w, addr, addrlen);
+    return n;
 }
 
 int getsockname(int fd, struct sockaddr *__restrict addr, socklen_t *__restrict len) {

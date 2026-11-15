@@ -106,7 +106,9 @@ Python can listen, connect and resolve host names with `WithNetwork`, so
 ```go
 py, err := pywasi.New(ctx, pywasi.WithNetwork(func(op, address string) error {
 	// op is "listen", "connect" or "resolve"; address is "host:port", or a
-	// name for "resolve". Return an error to deny it. nil allows everything.
+	// name for "resolve". Binding a UDP socket is "listen", and sending a
+	// datagram is "connect". Return an error to deny it. nil allows
+	// everything.
 	if op == "listen" && !strings.HasPrefix(address, "127.0.0.1:") {
 		return errors.New("local only")
 	}
@@ -119,9 +121,9 @@ Without it, creating a socket or resolving a name raises `PermissionError`
 message says to use `WithNetwork`. WASI preview 1 can only
 accept, read and write on sockets, so the interpreter's
 `toolchain/support/pywasi_socket.c` implements `socket`, `bind`, `listen`,
-`connect`, `getaddrinfo` and the rest with host functions in Go
-(`sockets.go`), which open real listeners and connections that the WASI
-calls then use. Canceling `Run`'s context stops Python while it waits on a
+`connect`, `sendto`, `recvfrom`, `getaddrinfo` and the rest with host
+functions in Go (`sockets.go`), which open real TCP and UDP sockets that
+the WASI calls then use. Canceling `Run`'s context stops Python while it waits on a
 socket or sleeps.
 
 `ssl` and `hashlib` use OpenSSL 3.5, built for WASI in
@@ -136,7 +138,8 @@ There are no threads, so `socketserver`'s threading servers (and
 `ThreadPoolExecutor` runs its work inline in `submit`. asyncio works,
 including `to_thread` and host name lookups, but those block the event
 loop while they run. `socket.socketpair` (asyncio's wakeup channel) works
-without network access. Only TCP is supported, and `connect` doesn't time
+without network access. TCP and UDP are supported (not raw sockets,
+`sendmsg` and `recvmsg`, or multicast options), and `connect` doesn't time
 out with the socket's timeout.
 
 An interpreter linked by pywasi imports these host functions, so to run it
