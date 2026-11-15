@@ -2,11 +2,15 @@ package pywasi_test
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"go.chrisrx.dev/pywasi"
 )
@@ -116,6 +120,47 @@ func TestPackagesBuiltIn(t *testing.T) {
 	got, err := py.Eval[string](context.Background(), "import numpy, tabulate\ntabulate.tabulate(numpy.eye(2, dtype=int))")
 	if err != nil || !strings.Contains(got, "1  0") {
 		t.Fatalf("got %q err=%v", got, err)
+	}
+}
+
+func TestPackagesCatalogChange(t *testing.T) {
+	// A cached resolution is reused while the catalog is unchanged, and
+	// redone when it changes (a republished bundle or a newer kit).
+	cache := t.TempDir()
+	t.Setenv("PYWASI_CACHE", cache)
+	var body atomic.Value
+	body.Store(`{"version":1,"linker":{"url":"","sha256":""},"kits":[],"bundles":[]}`)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(body.Load().(string)))
+	}))
+	defer srv.Close()
+
+	resolutions := func() int {
+		t.Helper()
+		if _, err := stdlibPython(t, pywasi.WithPackages("tabulate"), pywasi.WithCatalog(srv.URL)); err != nil {
+			t.Fatal(err)
+		}
+		files, _ := filepath.Glob(filepath.Join(cache, "resolutions", "*.json"))
+		return len(files)
+	}
+	if n := resolutions(); n != 1 {
+		t.Fatalf("%d resolutions, want 1", n)
+	}
+	if n := resolutions(); n != 1 {
+		t.Fatalf("unchanged catalog: %d resolutions, want 1", n)
+	}
+
+	// Change the catalog and expire the cached copy.
+	body.Store(`{"version":1,"linker":{"url":"","sha256":""},"kits":[{"url":"","sha256":"","abi":"x","python":"2.7.18"}],"bundles":[]}`)
+	catalogs, _ := filepath.Glob(filepath.Join(cache, "catalogs", "*.json"))
+	old := time.Now().Add(-time.Hour)
+	for _, f := range catalogs {
+		if err := os.Chtimes(f, old, old); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if n := resolutions(); n != 2 {
+		t.Fatalf("changed catalog: %d resolutions, want 2", n)
 	}
 }
 

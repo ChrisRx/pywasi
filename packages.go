@@ -119,10 +119,22 @@ func (p *Python) packageLayer(ctx context.Context, opts config) (string, layers,
 		catalogURL = opts.catalog
 	}
 
+	// Packages with C extensions that can be linked in. Only for an
+	// interpreter without extensions of its own, since a linked one has
+	// only the kit's. The catalog's contents are part of the resolution's
+	// key, so a republished bundle or a newer kit is picked up once the
+	// cached catalog expires.
+	var cat *catalog
+	if catalogURL != "" && p.extensions() == 0 {
+		if cat, err = loadCatalog(ctx, catalogURL); err != nil {
+			return "", l, err
+		}
+	}
+
 	reqs := slices.Clone(opts.packages)
 	slices.Sort(reqs)
 	reqs = slices.Compact(reqs)
-	key := digestJSON([]any{"v2", p.digest, reqs, string(opts.pylock), resolverKind, index, catalogURL})
+	key := digestJSON([]any{"v3", p.digest, reqs, string(opts.pylock), resolverKind, index, catalogURL, cat})
 	cached := filepath.Join(data, "resolutions", key+".json")
 
 	if b, err := os.ReadFile(cached); err == nil {
@@ -130,16 +142,9 @@ func (p *Python) packageLayer(ctx context.Context, opts config) (string, layers,
 			return "", l, fmt.Errorf("pywasi: reading cached resolution %s: %w", cached, err)
 		}
 	} else {
-		// Packages with C extensions that can be linked in. Only for an
-		// interpreter without extensions of its own, since a linked one
-		// has only the kit's.
 		prebuilt := map[string][]map[string]any{}
 		var available map[string][]bundleEntry
-		var cat *catalog
-		if catalogURL != "" && p.extensions() == 0 {
-			if cat, err = loadCatalog(ctx, catalogURL); err != nil {
-				return "", l, err
-			}
+		if cat != nil {
 			version, err := p.pythonVersion()
 			if err != nil {
 				return "", l, err
