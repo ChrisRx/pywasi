@@ -1,0 +1,95 @@
+numpy: method and getset signatures that match how CPython calls them.
+
+wasm checks the type of every indirect call, so a C method, getter or
+setter whose definition doesn't match its calling convention traps and
+kills the interpreter, where native platforms ignore the extra argument.
+copy.copy(np.float64(1)) and arr.dtype = ... both trapped. Adds the
+missing unused parameters, and fixes the METH_* flags of
+_get_castingimpl (takes no keywords) and printf_float_g (takes them).
+Found by numpy's test suite and a scan of the method and getset tables.
+Used by toolchain/recipes.toml.
+
+diff --color -ruN a/numpy/_core/src/multiarray/array_converter.c b/numpy/_core/src/multiarray/array_converter.c
+--- a/numpy/_core/src/multiarray/array_converter.c
++++ b/numpy/_core/src/multiarray/array_converter.c
+@@ -129,7 +129,7 @@
+ 
+ 
+ static PyObject *
+-array_converter_get_scalar_input(PyArrayArrayConverterObject *self)
++array_converter_get_scalar_input(PyArrayArrayConverterObject *self, void *NPY_UNUSED(ignored))
+ {
+     PyObject *ret = PyTuple_New(self->narrs);
+     if (ret == NULL) {
+diff --color -ruN a/numpy/_core/src/multiarray/array_method.c b/numpy/_core/src/multiarray/array_method.c
+--- a/numpy/_core/src/multiarray/array_method.c
++++ b/numpy/_core/src/multiarray/array_method.c
+@@ -971,7 +971,7 @@
+ 
+ 
+ static PyObject *
+-boundarraymethod__supports_unaligned(PyBoundArrayMethodObject *self)
++boundarraymethod__supports_unaligned(PyBoundArrayMethodObject *self, void *NPY_UNUSED(ignored))
+ {
+     return PyBool_FromLong(self->method->flags & NPY_METH_SUPPORTS_UNALIGNED);
+ }
+diff --color -ruN a/numpy/_core/src/multiarray/getset.c b/numpy/_core/src/multiarray/getset.c
+--- a/numpy/_core/src/multiarray/getset.c
++++ b/numpy/_core/src/multiarray/getset.c
+@@ -385,7 +385,7 @@
+ }
+ 
+ static int
+-array_descr_set(PyArrayObject *self, PyObject *arg)
++array_descr_set(PyArrayObject *self, PyObject *arg, void *NPY_UNUSED(ignored))
+ {
+     if (arg == NULL) {
+         PyErr_SetString(PyExc_AttributeError,
+diff --color -ruN a/numpy/_core/src/multiarray/multiarraymodule.c b/numpy/_core/src/multiarray/multiarraymodule.c
+--- a/numpy/_core/src/multiarray/multiarraymodule.c
++++ b/numpy/_core/src/multiarray/multiarraymodule.c
+@@ -4791,7 +4791,7 @@
+     {"_discover_array_parameters", (PyCFunction)_discover_array_parameters,
+         METH_FASTCALL | METH_KEYWORDS, NULL},
+     {"_get_castingimpl",  (PyCFunction)_get_castingimpl,
+-        METH_VARARGS | METH_KEYWORDS, NULL},
++        METH_VARARGS, NULL},
+     {"_is_view_safe_cast",  (PyCFunction)_is_view_safe_cast,
+         METH_FASTCALL, NULL},
+     {"_load_from_filelike", (PyCFunction)_load_from_filelike,
+diff --color -ruN a/numpy/_core/src/multiarray/_multiarray_tests.c.src b/numpy/_core/src/multiarray/_multiarray_tests.c.src
+--- a/numpy/_core/src/multiarray/_multiarray_tests.c.src
++++ b/numpy/_core/src/multiarray/_multiarray_tests.c.src
+@@ -2429,7 +2429,7 @@
+ /**end repeat**/
+     {"format_float_OSprintf_g",
+         (PyCFunction)printf_float_g,
+-        METH_VARARGS , NULL},
++        METH_VARARGS | METH_KEYWORDS, NULL},
+     {"get_struct_alignments",
+         get_struct_alignments,
+         METH_VARARGS, NULL},
+diff --color -ruN a/numpy/_core/src/multiarray/scalartypes.c.src b/numpy/_core/src/multiarray/scalartypes.c.src
+--- a/numpy/_core/src/multiarray/scalartypes.c.src
++++ b/numpy/_core/src/multiarray/scalartypes.c.src
+@@ -2125,7 +2125,7 @@
+ /**end repeat**/
+ 
+ static PyObject *
+-gentype___copy__(PyObject *self)
++gentype___copy__(PyObject *self, PyObject *NPY_UNUSED(args))
+ {
+     // scalars are immutable, so we can return a new reference
+     // the only exceptions are scalars with void dtype
+diff --color -ruN a/numpy/_core/src/umath/_scaled_float_dtype.c b/numpy/_core/src/umath/_scaled_float_dtype.c
+--- a/numpy/_core/src/umath/_scaled_float_dtype.c
++++ b/numpy/_core/src/umath/_scaled_float_dtype.c
+@@ -189,7 +189,7 @@
+ 
+ 
+ static PyObject *
+-sfloat___reduce__(PyArray_SFloatDescr *self)
++sfloat___reduce__(PyArray_SFloatDescr *self, PyObject *NPY_UNUSED(args))
+ {
+     return Py_BuildValue("(O(d))", Py_TYPE(self), self->scaling);
+ }

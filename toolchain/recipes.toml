@@ -31,7 +31,7 @@ config-settings.setup-args = [
     "-Ddisable-highway=false",
     "-Ddisable-intel-sort=true",
 ]
-patches = ["numpy-xerbla-length.patch", "numpy-wasm-fpstatus.patch", "numpy-wasm-highway-sort.patch"]
+patches = ["numpy-xerbla-length.patch", "numpy-wasm-fpstatus.patch", "numpy-wasm-highway-sort.patch", "numpy-wasm-method-signatures.patch"]
 exclude-extensions = '^numpy\._core\.(_[a-z_]+_tests|_simd)$'
 
 [pyyaml]
