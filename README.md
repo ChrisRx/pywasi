@@ -89,8 +89,11 @@ go run go.chrisrx.dev/pywasi/cmd/pywasi@latest -m http.server 8000
 It uses `$PYWASI_HOME` or `./.pywasi` if there is one, else the embedded
 interpreter (`-home` picks another). `-mount HOST:/GUEST` exposes more
 directories, and `-cwd=false` leaves out the current one. The prompt is
-CPython's basic one, without line editing, since the newer one needs
-`termios`, which WASI lacks. Python can use the network, like a native
+CPython's own, with completion, history and colors: pywasi gives the guest a
+`termios` that sets the host terminal's modes. History is kept in the pywasi
+cache directory, and `PYTHON_BASIC_REPL=1` picks the basic prompt. Ctrl-C
+interrupts a line being edited, but ends pywasi while code runs, since
+signals can't reach the guest. Python can use the network, like a native
 python, and `-net=false` turns that off (see [Network](#network)). From Go, `RunOptions.Dir` sets the working directory.
 
 With no interpreter options, `New` uses `$PYWASI_HOME` or `./.pywasi` if
@@ -474,7 +477,7 @@ Native numpy uses AVX2/AVX-512 kernels for matmul and sort, and wasm SIMD is
 - No threads (WASI preview 1), so BLAS runs single-threaded, and
   `threading.Thread.start` raises `RuntimeError`.
 - Modules WASI can't support are missing (`ctypes`, `mmap`, `fcntl`,
-  `termios`, `readline`, `curses`, `resource`, `pwd`, `grp`), and
+  `readline`, `curses`, `resource`, `pwd`, `grp`), and
   `subprocess` and `multiprocessing` can't start processes.
 - SQLite has no file locking or WAL mode, so don't share a database file
   between processes.

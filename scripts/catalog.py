@@ -6,7 +6,7 @@ links packages with C extensions from (see linker.go):
 
     {"version": 1,
      "linker": {"url", "sha256"},
-     "kits": [{"url", "sha256", "abi", "python"}],
+     "kits": [{"url", "sha256", "abi", "python", "host"}],
      "bundles": [{"url", "sha256", "name", "version", "abi", "requires"}]}
 
 Kits and bundles come from `scripts/build.sh ... --kit FILE --bundles DIR`,
@@ -14,6 +14,12 @@ and the linker from `nix build .#lld-wasi`. Their metadata is read from
 inside the archives. Run in the dev shell (Python 3.14 for zstd):
 
     scripts/catalog.py --linker result/bin/lld.wasm --kit kit.tar.zst --bundle numpy-*.tar.zst
+
+Kits are listed by host revision (the host functions their interpreter
+imports, HOST_REV in toolchain/pywasi_build.py), highest first, then oldest
+first. pywasi picks the newest kit of the highest revision it supports,
+while pywasi from before host revisions takes the last kit, the newest it
+can run.
 
 Uploads go through scripts/publish.sh (credentials as documented there).
 Entries already in the catalog are kept, except that a bundle replaces an
@@ -78,7 +84,11 @@ def main():
         meta = member_json(kit, "link.json")
         url, digest = publish(kit, "kits")
         if not any(k["sha256"] == digest for k in index["kits"]):
-            index["kits"].append({"url": url, "sha256": digest, "abi": meta["abi"], "python": meta["python"]})
+            index["kits"].append(
+                {"url": url, "sha256": digest, "abi": meta["abi"], "python": meta["python"], "host": meta.get("host", 0)}
+            )
+    # Stable, so kits of the same revision stay oldest first.
+    index["kits"].sort(key=lambda k: -k.get("host", 0))
 
     for bundle in args.bundle:
         meta = member_json(bundle, "bundle.json")

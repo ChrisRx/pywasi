@@ -62,9 +62,16 @@ def resume(argv, env):
 
 
 def interact(main):
-    """The interactive prompt, as python starts it on a terminal. CPython's
-    own REPL needs termios, which WASI lacks, so this is the basic one."""
-    import code
+    """The interactive prompt, as python starts it on a terminal: CPython's
+    own REPL (_pyrepl), which falls back to the basic one if it can't use
+    the terminal, or the basic one with PYTHON_BASIC_REPL set."""
+    print(f"Python {sys.version} on {sys.platform}", file=sys.stderr)
+    print('Type "help", "copyright", "credits" or "license" for more information.', file=sys.stderr)
+    if os.environ.get("PYTHON_BASIC_REPL"):
+        import code
 
-    banner = f"Python {sys.version} on {sys.platform}\n" 'Type "help", "copyright", "credits" or "license" for more information.'
-    code.interact(banner=banner, local=main.__dict__, exitmsg="")
+        code.interact(banner="", local=main.__dict__, exitmsg="")
+        return
+    from _pyrepl.main import interactive_console
+
+    interactive_console(main)

@@ -349,6 +349,8 @@ func (p *Python) run(ctx context.Context, opts RunOptions) (int, error) {
 		modCfg = modCfg.WithStderr(opts.Stderr)
 	}
 
+	ctx, restore := withTerminals(ctx, opts.Stdin, opts.Stdout, opts.Stderr)
+	defer restore()
 	mod, err := p.runtime.InstantiateModule(ctx, p.compiled, modCfg)
 	if mod != nil {
 		defer mod.Close(ctx)

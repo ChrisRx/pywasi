@@ -16,10 +16,12 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 
 	"go.chrisrx.dev/pywasi"
+	"golang.org/x/term"
 )
 
 type mounts []pywasi.Mount
@@ -73,12 +75,16 @@ func main() {
 	defer py.Close()
 
 	env := map[string]string{}
-	if v, ok := os.LookupEnv("PYTHON_BASIC_REPL"); ok {
-		env["PYTHON_BASIC_REPL"] = v
-	} else {
-		// CPython's newer REPL needs termios, which WASI lacks. Snapshotted
-		// interpreters start the basic one themselves.
-		env["PYTHON_BASIC_REPL"] = "1"
+	// What the REPL and colored output look at.
+	for _, k := range []string{"TERM", "COLORTERM", "NO_COLOR", "FORCE_COLOR", "PYTHON_COLORS", "PYTHON_BASIC_REPL"} {
+		if v, ok := os.LookupEnv(k); ok {
+			env[k] = v
+		}
+	}
+	if len(args) == 0 && term.IsTerminal(int(os.Stdin.Fd())) {
+		if file, ok := mountHistory(&mnts); ok {
+			env["PYTHON_HISTORY"] = file
+		}
 	}
 	var dir string
 	if *cwd {
@@ -99,6 +105,30 @@ func main() {
 	}
 	py.Close()
 	os.Exit(code)
+}
+
+// historyGuest is where the REPL's history file is mounted.
+const historyGuest = "/.pywasi-history"
+
+// mountHistory mounts a directory for the REPL's history, kept with
+// pywasi's cache ($PYWASI_CACHE, else the user cache directory), and
+// returns the history file's guest path. The guest has no home directory
+// for Python's usual ~/.python_history.
+func mountHistory(mnts *mounts) (string, bool) {
+	dir := os.Getenv("PYWASI_CACHE")
+	if dir == "" {
+		cache, err := os.UserCacheDir()
+		if err != nil {
+			return "", false
+		}
+		dir = filepath.Join(cache, "pywasi")
+	}
+	dir = filepath.Join(dir, "history")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return "", false
+	}
+	*mnts = append(*mnts, pywasi.Mount{Host: dir, Guest: historyGuest})
+	return historyGuest + "/python_history", true
 }
 
 func cacheOption(dir string) pywasi.Option {

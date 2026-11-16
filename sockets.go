@@ -125,7 +125,8 @@ const (
 // address.
 const wireAddrSize = 28
 
-// instantiateHost adds the "pywasi" host module to r.
+// instantiateHost adds the "pywasi" host module to r: sockets, and
+// terminals (terminal.go).
 func instantiateHost(ctx context.Context, r wazero.Runtime, n network) error {
 	h := sockets{net: n}
 	b := r.NewHostModuleBuilder("pywasi")
@@ -146,6 +147,9 @@ func instantiateHost(ctx context.Context, r wazero.Runtime, n network) error {
 		{"sock_pair", h.pair, 3},
 		{"sock_sendto", h.sendto, 6},
 		{"sock_recvfrom", h.recvfrom, 6},
+		{"term_get", termGet, 1},
+		{"term_set", termSet, 6},
+		{"term_size", termSize, 2},
 	} {
 		params := make([]api.ValueType, f.params)
 		for i := range params {

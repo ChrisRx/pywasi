@@ -1,0 +1,93 @@
+--- a/Lib/_pyrepl/commands.py
++++ b/Lib/_pyrepl/commands.py
+@@ -219,6 +219,8 @@
+ 
+         self.reader.console.finish()
+         self.reader.finish()
++        if not hasattr(os, "kill"):  # WASI
++            raise KeyboardInterrupt
+         os.kill(os.getpid(), signal.SIGINT)
+ 
+ 
+@@ -233,6 +235,8 @@
+     def do(self) -> None:
+         import signal
+ 
++        if not hasattr(os, "kill"):  # WASI can't stop itself.
++            return
+         r = self.reader
+         p = r.pos
+         r.console.finish()
+--- a/Lib/_pyrepl/readline.py
++++ b/Lib/_pyrepl/readline.py
+@@ -354,10 +354,12 @@
+     config: ReadlineConfig = field(default_factory=ReadlineConfig, repr=False)
+ 
+     def __post_init__(self) -> None:
++        # WASI has no dup: use the descriptors themselves.
++        dup = os.dup if sys.platform != "wasi" else lambda fd: fd
+         if self.f_in == -1:
+-            self.f_in = os.dup(0)
++            self.f_in = dup(0)
+         if self.f_out == -1:
+-            self.f_out = os.dup(1)
++            self.f_out = dup(1)
+ 
+     def get_reader(self) -> ReadlineAlikeReader:
+         if self.reader is None:
+--- a/Lib/_pyrepl/unix_console.py
++++ b/Lib/_pyrepl/unix_console.py
+@@ -31,7 +31,10 @@
+ import time
+ import types
+ import platform
+-from fcntl import ioctl
++try:
++    from fcntl import ioctl
++except ImportError:  # WASI
++    ioctl = None
+ 
+ from _colorize import ANSIColors
+ 
+@@ -69,8 +72,8 @@
+ 
+ SIGWINCH_EVENT = "repaint"
+ 
+-FIONREAD = getattr(termios, "FIONREAD", None)
+-TIOCGWINSZ = getattr(termios, "TIOCGWINSZ", None)
++FIONREAD = getattr(termios, "FIONREAD", None) if ioctl else None
++TIOCGWINSZ = getattr(termios, "TIOCGWINSZ", None) if ioctl else None
+ 
+ # ------------ start of baudrate definitions ------------
+ 
+@@ -496,7 +499,13 @@
+             try:
+                 return int(os.environ["LINES"]), int(os.environ["COLUMNS"])
+             except (KeyError, TypeError, ValueError):
+-                return 25, 80
++                try:
++                    height, width = termios.tcgetwinsize(self.input_fd)
++                except (AttributeError, NotImplementedError, termios.error):
++                    return 25, 80
++                if not height:
++                    return 25, 80
++                return height, width
+ 
+     def forgetinput(self):
+         """
+@@ -574,8 +583,13 @@
+                 e.data += e2.data
+                 e.raw += e.raw
+ 
+-            amount = 10000
+-            raw = self.__read(amount)
++            # Only what is already there, without FIONREAD to ask how much.
++            raw = b""
++            while self.pollob.poll(0):
++                chunk = self.__read(10000)
++                if not chunk:
++                    break
++                raw += chunk
+             data = str(raw, self.encoding, "replace")
+             e.data += data
+             e.raw += raw

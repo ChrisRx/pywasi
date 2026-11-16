@@ -48,7 +48,21 @@ type kitEntry struct {
 	artifact
 	ABI    string `json:"abi"`
 	Python string `json:"python"`
+	// Host is the revision of pywasi's host functions the kit's
+	// interpreter imports (hostRev), 0 for kits from before it was
+	// recorded.
+	Host int `json:"host"`
 }
+
+// hostRev is the revision of the host functions (module "pywasi") this
+// pywasi provides. Interpreters linked from a kit with a higher revision
+// import functions it lacks, so the catalog's kits are picked by it.
+// Bump it with HOST_REV in toolchain/pywasi_build.py when host functions
+// are added.
+//
+//	0: sockets (sock_*)
+//	1: terminals (term_*)
+const hostRev = 1
 
 type bundleEntry struct {
 	artifact
@@ -111,13 +125,20 @@ func loadCatalog(ctx context.Context, url string) (*catalog, error) {
 }
 
 // prebuilt is what the catalog can link into an interpreter for python
-// ("3.X"): the newest kit for it and the bundles built against that kit.
+// ("3.X"): the newest kit for it that this pywasi's host functions can run
+// (the highest host revision up to hostRev), and the bundles built against
+// that kit.
+//
+// Later entries are newer among kits of the same host revision, and the
+// catalog lists higher revisions first (scripts/catalog.py): pywasi from
+// before host revisions took the last kit for python, which is then the
+// newest one it can run.
 func (c *catalog) prebuilt(python string) (kitEntry, map[string][]bundleEntry, bool) {
 	var kit kitEntry
 	found := false
 	for _, k := range c.Kits {
-		if strings.HasPrefix(k.Python, python+".") {
-			kit, found = k, true // Later entries are newer.
+		if strings.HasPrefix(k.Python, python+".") && k.Host <= hostRev && (!found || k.Host >= kit.Host) {
+			kit, found = k, true
 		}
 	}
 	if !found {
@@ -171,6 +192,7 @@ func linkInterpreter(ctx context.Context, linker artifact, kit kitEntry, bundles
 	}
 	var link struct {
 		ABI  string   `json:"abi"`
+		Host int      `json:"host"`
 		Args []string `json:"args"`
 	}
 	b, err := os.ReadFile(filepath.Join(kitDir, "link.json"))
@@ -179,6 +201,9 @@ func linkInterpreter(ctx context.Context, linker artifact, kit kitEntry, bundles
 	}
 	if err != nil {
 		return "", nil, fmt.Errorf("pywasi: link kit: %w", err)
+	}
+	if link.Host > hostRev {
+		return "", nil, fmt.Errorf("pywasi: link kit needs host functions revision %d, this pywasi has %d; update pywasi", link.Host, hostRev)
 	}
 	lld, err := linkerWasm(ctx, linker)
 	if err != nil {
