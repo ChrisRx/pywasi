@@ -1,5 +1,5 @@
-github.com/ChrisRx/wazero v0.0.0-20261115213353-eb9e25a2a825 h1:sFmXPVZKbsy9CJ1L9u3ZtqI0cddW+SKI3WHg3xC7xCk=
-github.com/ChrisRx/wazero v0.0.0-20261115213353-eb9e25a2a825/go.mod h1:FD4DCVOcDFGvOqL4aMGadFN5jGl0ugpsz7Czuiy1PLM=
+github.com/ChrisRx/wazero v0.0.0-20261116205937-3f122248aff2 h1:pR7XkDOfMLcE4cZfJusRbsF+wOoropkqQTK1gjVVWhA=
+github.com/ChrisRx/wazero v0.0.0-20261116205937-3f122248aff2/go.mod h1:FD4DCVOcDFGvOqL4aMGadFN5jGl0ugpsz7Czuiy1PLM=
 github.com/klauspost/compress v1.20.4 h1:dD0v/bvxtjCBqQu6sx1TNWkalEY5lNTIe+HY9w8TeNI=
 github.com/klauspost/compress v1.20.4/go.mod h1:LUdAzn7YLVvxLpc7y3V1m40wESHTgc1422pwwBSKYuI=
 go.chrisrx.dev/x v0.0.0-20261103231709-6405755dad2b h1:N275XP5xJyGqYJSeBc2eRNloAl3nzA1kZ5N3qOWP0dY=

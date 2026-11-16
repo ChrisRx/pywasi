@@ -7,18 +7,11 @@ import (
 	"fmt"
 	"math"
 	"strconv"
-
-	"github.com/ChrisRx/wazero"
-	"github.com/ChrisRx/wazero/imports/wasi_snapshot_preview1"
-	"github.com/ChrisRx/wazero/sys"
-	"go.chrisrx.dev/x/context"
 )
 
-// Pre-initialization of linked interpreters, like Wizer (which the build
-// uses for interpreters built from source): python.wasm's
+// Reading python.wasm for pre-initialization (see image.go): its
 // wizer-initialize export starts CPython and imports the preload modules,
-// and the resulting memory and globals become the module's initial state.
-// pywasi-resume then replaces _start, so each run skips startup. See
+// and pywasi-resume runs a program from that state. See
 // toolchain/support/pywasi_main.c.
 
 const (
@@ -29,64 +22,12 @@ const (
 
 // Section ids.
 const (
-	secCustom    = 0
-	secImport    = 2
-	secMemory    = 5
-	secGlobal    = 6
-	secExport    = 7
-	secStart     = 8
-	secData      = 11
-	secDataCount = 12
+	secCustom = 0
+	secImport = 2
+	secGlobal = 6
+	secExport = 7
+	secData   = 11
 )
-
-// snapshotWasm runs wasm's initialization with cfg (its WASI environment:
-// the same mounts and paths as at runtime) and returns the pre-initialized
-// module.
-func snapshotWasm(ctx context.Context, r wazero.Runtime, wasm []byte, cfg wazero.ModuleConfig) ([]byte, error) {
-	m, err := parseWasm(wasm)
-	if err != nil {
-		return nil, err
-	}
-	if !m.exports[initExport] || !m.exports[resumeExport] {
-		return nil, errors.New("no snapshot entry points")
-	}
-	instrumented, err := m.encode(nil, nil)
-	if err != nil {
-		return nil, err
-	}
-	compiled, err := r.CompileModule(ctx, instrumented)
-	if err != nil {
-		return nil, err
-	}
-	defer compiled.Close(ctx)
-	mod, err := r.InstantiateModule(ctx, compiled, cfg.WithName("").WithStartFunctions())
-	if err != nil {
-		return nil, err
-	}
-	defer mod.Close(ctx)
-	if _, err := mod.ExportedFunction(initExport).Call(ctx); err != nil {
-		var exitErr *sys.ExitError
-		if errors.As(err, &exitErr) {
-			return nil, fmt.Errorf("initialization exited with code %d", exitErr.ExitCode())
-		}
-		return nil, err
-	}
-	values := map[uint32]uint64{}
-	for _, g := range m.globals {
-		if g.mutable {
-			values[g.index] = mod.ExportedGlobal(globalPrefix + strconv.Itoa(int(g.index))).Get()
-		}
-	}
-	mem := mod.Memory()
-	if mem == nil {
-		return nil, errors.New("no memory")
-	}
-	data, ok := mem.Read(0, mem.Size())
-	if !ok {
-		return nil, errors.New("reading memory")
-	}
-	return m.encode(values, data)
-}
 
 type wasmSection struct {
 	id   byte
@@ -164,6 +105,7 @@ func parseWasm(b []byte) (*wasmModule, error) {
 				switch flag := s.u32(); flag {
 				case 0:
 					s.constExpr()
+				case 1: // passive
 				case 2:
 					s.u32()
 					s.constExpr()
@@ -180,81 +122,22 @@ func parseWasm(b []byte) (*wasmModule, error) {
 	return m, nil
 }
 
-// encode writes the module. Without data it adds an export for every
-// mutable global, to read them after initialization. With data (the
-// memory after initialization) and values (of mutable globals) it writes
-// the snapshot: memory and globals start in that state, and the resume
-// entry point is _start.
-func (m *wasmModule) encode(values map[uint32]uint64, data []byte) ([]byte, error) {
-	snapshot := data != nil
+// instrument writes the module with an export for every mutable global,
+// so their values can be read after initialization and set when an image
+// is restored (see image.go).
+func (m *wasmModule) instrument() ([]byte, error) {
 	out := []byte("\x00asm\x01\x00\x00\x00")
 	for _, s := range m.sections {
 		body := s.body
-		switch s.id {
-		case secMemory:
-			if snapshot {
-				r := &wasmReader{b: s.body}
-				if n := r.u32(); n != 1 {
-					return nil, fmt.Errorf("%d memories", n)
-				}
-				flags, _, maxPages := r.limits()
-				if r.err != nil {
-					return nil, r.err
-				}
-				body = appendU32(nil, 1)
-				body = append(body, flags)
-				body = appendU32(body, uint32(len(data)/65536))
-				if flags&1 != 0 {
-					body = appendU32(body, maxPages)
-				}
-			}
-		case secGlobal:
-			if snapshot {
-				body = appendU32(nil, uint32(len(m.globals)))
-				for _, g := range m.globals {
-					body = append(body, g.valtype, boolByte(g.mutable))
-					if !g.mutable {
-						body = append(body, g.init...)
-						continue
-					}
-					v := values[g.index]
-					switch g.valtype {
-					case 0x7f: // i32
-						body = appendS64(append(body, 0x41), int64(int32(uint32(v))))
-					case 0x7e: // i64
-						body = appendS64(append(body, 0x42), int64(v))
-					case 0x7d: // f32
-						body = binary.LittleEndian.AppendUint32(append(body, 0x43), uint32(v))
-					case 0x7c: // f64
-						body = binary.LittleEndian.AppendUint64(append(body, 0x44), v)
-					default:
-						return nil, fmt.Errorf("mutable global of type 0x%x", g.valtype)
-					}
-					body = append(body, 0x0b)
-				}
-			}
-		case secExport:
+		if s.id == secExport {
 			r := &wasmReader{b: s.body}
-			var exports []wasmExport
-			for _, e := range r.exports() {
-				switch {
-				case !snapshot:
-					exports = append(exports, e)
-				case e.name == "_start" || e.name == initExport:
-				case e.name == resumeExport:
-					exports = append(exports, wasmExport{"_start", e.kind, e.index})
-				default:
-					exports = append(exports, e)
-				}
-			}
+			exports := r.exports()
 			if r.err != nil {
 				return nil, r.err
 			}
-			if !snapshot {
-				for _, g := range m.globals {
-					if g.mutable {
-						exports = append(exports, wasmExport{globalPrefix + strconv.Itoa(int(g.index)), 3, g.index})
-					}
+			for _, g := range m.globals {
+				if g.mutable {
+					exports = append(exports, wasmExport{globalPrefix + strconv.Itoa(int(g.index)), 3, g.index})
 				}
 			}
 			body = appendU32(nil, uint32(len(exports)))
@@ -264,75 +147,12 @@ func (m *wasmModule) encode(values map[uint32]uint64, data []byte) ([]byte, erro
 				body = append(body, e.kind)
 				body = appendU32(body, e.index)
 			}
-		case secStart:
-			if snapshot {
-				continue // Initialization already ran.
-			}
-		case secDataCount:
-			if snapshot {
-				body = appendU32(nil, uint32(len(dataSegments(data))))
-			}
-		case secData:
-			if snapshot {
-				segs := dataSegments(data)
-				body = appendU32(nil, uint32(len(segs)))
-				for _, seg := range segs {
-					body = append(body, 0, 0x41)
-					body = appendS64(body, int64(int32(uint32(seg[0]))))
-					body = append(body, 0x0b)
-					body = appendU32(body, uint32(seg[1]-seg[0]))
-					body = append(body, data[seg[0]:seg[1]]...)
-				}
-			}
 		}
 		out = append(out, s.id)
 		out = appendU32(out, uint32(len(body)))
 		out = append(out, body...)
 	}
 	return out, nil
-}
-
-// dataSegments returns the [start, end) ranges of data's nonzero bytes,
-// merging ranges separated by short runs of zeros (each segment costs
-// about 10 bytes).
-func dataSegments(data []byte) [][2]int {
-	const maxGap = 32
-	var segs [][2]int
-	i := 0
-	for {
-		for i < len(data) && data[i] == 0 {
-			i++
-		}
-		if i == len(data) {
-			return segs
-		}
-		start := i
-		end := i
-		for i < len(data) {
-			if data[i] != 0 {
-				i++
-				end = i
-				continue
-			}
-			j := i
-			for j < len(data) && j-end < maxGap && data[j] == 0 {
-				j++
-			}
-			if j == len(data) || data[j] == 0 {
-				break
-			}
-			i = j
-		}
-		segs = append(segs, [2]int{start, end})
-		i = end
-	}
-}
-
-func boolByte(b bool) byte {
-	if b {
-		return 1
-	}
-	return 0
 }
 
 // appendS64 appends v as signed LEB128 (not Go's zigzag varint).
@@ -458,27 +278,4 @@ func (r *wasmReader) constExpr() []byte {
 	}
 	r.fail()
 	return nil
-}
-
-// newSnapshotRuntime is a runtime for snapshotWasm, with WASI.
-func newSnapshotRuntime(ctx context.Context, cacheDir string) (wazero.Runtime, error) {
-	cfg := wazero.NewRuntimeConfig().WithDebugInfoEnabled(false)
-	if cacheDir != "" {
-		cache, err := wazero.NewCompilationCacheWithDir(cacheDir)
-		if err != nil {
-			return nil, err
-		}
-		cfg = cfg.WithCompilationCache(cache)
-	}
-	r := wazero.NewRuntimeWithConfig(ctx, cfg)
-	if _, err := wasi_snapshot_preview1.Instantiate(ctx, r); err != nil {
-		r.Close(ctx)
-		return nil, err
-	}
-	// No network while snapshotting.
-	if err := instantiateHost(ctx, r, network{}); err != nil {
-		r.Close(ctx)
-		return nil, err
-	}
-	return r, nil
 }

@@ -2,13 +2,13 @@ package pywasi
 
 import (
 	"bytes"
-	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"time"
@@ -62,7 +62,9 @@ type kitEntry struct {
 //
 //	0: sockets (sock_*)
 //	1: terminals (term_*)
-const hostRev = 1
+//	2: wasm exception handling (not a host function, but a pywasi without
+//	   it can't run modules that use it)
+const hostRev = 2
 
 type bundleEntry struct {
 	artifact
@@ -155,26 +157,44 @@ func (c *catalog) prebuilt(python string) (kitEntry, map[string][]bundleEntry, b
 
 // linkInterpreter links python.wasm from a kit and bundles with wasm-ld
 // running in wazero, and returns the new interpreter home (cached by its
-// inputs) and the bundles' site-packages directories, to mount at
-// bundleGuest(i).
-func linkInterpreter(ctx context.Context, linker artifact, kit kitEntry, bundles []bundleEntry, cacheDir string, boundsChecks bool) (string, []string, error) {
+// inputs), the bundles' site-packages directories, to mount at
+// bundleGuest(i), and the top-level modules of their extensions. The
+// interpreter isn't pre-initialized: that's done per set of packages (see
+// image.go).
+func linkInterpreter(ctx context.Context, linker artifact, kit kitEntry, bundles []bundleEntry, cacheDir string, boundsChecks bool) (string, []string, []string, error) {
 	data, err := dataDir()
 	if err != nil {
-		return "", nil, err
+		return "", nil, nil, err
 	}
 	// A fixed order, since the snapshot records where each bundle is.
 	bundles = slices.SortedFunc(slices.Values(bundles), func(a, b bundleEntry) int { return strings.Compare(a.Name, b.Name) })
 	var sites, bundleDirs []string
 	for _, b := range bundles {
 		if b.ABI != kit.ABI {
-			return "", nil, fmt.Errorf("pywasi: bundle %s %s was built for another kit", b.Name, b.Version)
+			return "", nil, nil, fmt.Errorf("pywasi: bundle %s %s was built for another kit", b.Name, b.Version)
 		}
 		dir, err := unpackCached(ctx, b.source(), "bundles", "bundle.json")
 		if err != nil {
-			return "", nil, fmt.Errorf("pywasi: bundle %s %s: %w", b.Name, b.Version, err)
+			return "", nil, nil, fmt.Errorf("pywasi: bundle %s %s: %w", b.Name, b.Version, err)
 		}
 		bundleDirs = append(bundleDirs, dir)
 		sites = append(sites, filepath.Join(dir, "site"))
+	}
+	metas := make([]bundleMeta, len(bundleDirs))
+	var modules []string
+	for i, dir := range bundleDirs {
+		b, err := os.ReadFile(filepath.Join(dir, "bundle.json"))
+		if err == nil {
+			err = json.Unmarshal(b, &metas[i])
+		}
+		if err != nil {
+			return "", nil, nil, fmt.Errorf("pywasi: bundle %s: %w", bundles[i].Name, err)
+		}
+		for _, m := range metas[i].Modules {
+			if top, _, _ := strings.Cut(m.Name, "."); !slices.Contains(modules, top) {
+				modules = append(modules, top)
+			}
+		}
 	}
 
 	ids := []string{snapshotRev, linker.SHA256, kit.SHA256}
@@ -183,12 +203,12 @@ func linkInterpreter(ctx context.Context, linker artifact, kit kitEntry, bundles
 	}
 	home := filepath.Join(data, "linked", digestJSON(ids))
 	if isHome(home) {
-		return home, sites, nil
+		return home, sites, modules, nil
 	}
 
 	kitDir, err := unpackCached(ctx, kit.source(), "kits", "link.json")
 	if err != nil {
-		return "", nil, fmt.Errorf("pywasi: link kit: %w", err)
+		return "", nil, nil, fmt.Errorf("pywasi: link kit: %w", err)
 	}
 	var link struct {
 		ABI  string   `json:"abi"`
@@ -200,57 +220,35 @@ func linkInterpreter(ctx context.Context, linker artifact, kit kitEntry, bundles
 		err = json.Unmarshal(b, &link)
 	}
 	if err != nil {
-		return "", nil, fmt.Errorf("pywasi: link kit: %w", err)
+		return "", nil, nil, fmt.Errorf("pywasi: link kit: %w", err)
 	}
 	if link.Host > hostRev {
-		return "", nil, fmt.Errorf("pywasi: link kit needs host functions revision %d, this pywasi has %d; update pywasi", link.Host, hostRev)
+		return "", nil, nil, fmt.Errorf("pywasi: link kit needs host functions revision %d, this pywasi has %d; update pywasi", link.Host, hostRev)
 	}
 	lld, err := linkerWasm(ctx, linker)
 	if err != nil {
-		return "", nil, err
+		return "", nil, nil, err
 	}
 
 	if err := os.MkdirAll(filepath.Dir(home), 0o755); err != nil {
-		return "", nil, err
+		return "", nil, nil, err
 	}
 	tmp, err := os.MkdirTemp(filepath.Dir(home), ".link-")
 	if err != nil {
-		return "", nil, err
+		return "", nil, nil, err
 	}
 	defer os.RemoveAll(tmp)
 	if err := os.MkdirAll(filepath.Join(tmp, "bin"), 0o755); err != nil {
-		return "", nil, err
+		return "", nil, nil, err
 	}
 
 	fsCfg := wazero.NewFSConfig().
 		WithReadOnlyDirMount(kitDir, "/kit").
 		WithDirMount(filepath.Join(tmp, "bin"), "/out")
-	var inputs []string
-	preload := []string{"_pywasi"}
 	for i, dir := range bundleDirs {
-		guest := fmt.Sprintf("/b%d", i)
-		fsCfg = fsCfg.WithReadOnlyDirMount(dir, guest)
-		var meta struct {
-			Modules []struct {
-				Name   string `json:"name"`
-				Object string `json:"object"`
-			} `json:"modules"`
-		}
-		b, err := os.ReadFile(filepath.Join(dir, "bundle.json"))
-		if err == nil {
-			err = json.Unmarshal(b, &meta)
-		}
-		if err != nil {
-			return "", nil, fmt.Errorf("pywasi: bundle %s: %w", bundles[i].Name, err)
-		}
-		for _, m := range meta.Modules {
-			inputs = append(inputs, guest+"/"+m.Object)
-			if top, _, _ := strings.Cut(m.Name, "."); !slices.Contains(preload, top) {
-				preload = append(preload, top)
-			}
-		}
-		inputs = append(inputs, guest+"/registration.o")
+		fsCfg = fsCfg.WithReadOnlyDirMount(dir, linkGuest(i))
 	}
+	inputs := linkInputs(metas)
 	args := []string{"wasm-ld", "-flavor", "wasm"}
 	for _, a := range link.Args {
 		switch a {
@@ -263,31 +261,24 @@ func linkInterpreter(ctx context.Context, linker artifact, kit kitEntry, bundles
 		}
 	}
 	if err := runWasm(compileContext(ctx, boundsChecks), lld, args, fsCfg, cacheDir); err != nil {
-		return "", nil, fmt.Errorf("pywasi: linking interpreter: %w", err)
+		return "", nil, nil, fmt.Errorf("pywasi: linking interpreter: %w", err)
 	}
 	if err := os.CopyFS(filepath.Join(tmp, "lib"), os.DirFS(filepath.Join(kitDir, "lib"))); err != nil {
-		return "", nil, err
+		return "", nil, nil, err
 	}
 	// Data files: CA certificates for ssl (etc) and the time zone
 	// database (share), in kits that have them.
 	for _, d := range []string{"etc", "share"} {
 		if src := filepath.Join(kitDir, d); isDir(src) {
 			if err := os.CopyFS(filepath.Join(tmp, d), os.DirFS(src)); err != nil {
-				return "", nil, err
+				return "", nil, nil, err
 			}
 		}
 	}
-	// Without a snapshot the interpreter still works, only slower to start.
-	if err := snapshotLinked(compileContext(ctx, boundsChecks), tmp, sites, preload, cacheDir); err != nil {
-		msg := []byte(fmt.Sprintf("pywasi: snapshot failed: %v\n", err))
-		if err := os.WriteFile(filepath.Join(tmp, "snapshot-error.txt"), msg, 0o644); err != nil {
-			return "", nil, err
-		}
-	}
 	if err := os.Rename(tmp, home); err != nil && !isHome(home) {
-		return "", nil, err
+		return "", nil, nil, err
 	}
-	return home, sites, nil
+	return home, sites, modules, nil
 }
 
 // linkerWasm returns wasm-ld for WASI (zstd-compressed in the catalog),
@@ -319,7 +310,7 @@ func linkerWasm(ctx context.Context, linker artifact) ([]byte, error) {
 
 // runWasm runs a WASI command to completion.
 func runWasm(ctx context.Context, wasm []byte, args []string, fsCfg wazero.FSConfig, cacheDir string) error {
-	cfg := wazero.NewRuntimeConfig().WithDebugInfoEnabled(false)
+	cfg := newRuntimeConfig()
 	if cacheDir != "" {
 		cache, err := wazero.NewCompilationCacheWithDir(cacheDir)
 		if err != nil {
@@ -351,53 +342,52 @@ func runWasm(ctx context.Context, wasm []byte, args []string, fsCfg wazero.FSCon
 	return err
 }
 
-// snapshotRev changes the cache key of linked interpreters when how they
-// are snapshotted changes.
-const snapshotRev = "snapshot-1"
+// snapshotRev changes the cache key of linked interpreters when what's in
+// their home changes. snapshot-4: no longer pre-initialized there.
+const snapshotRev = "snapshot-4"
+
+// bundleMeta is a bundle's bundle.json.
+// linkGuest is where the i-th bundle is mounted for the link.
+func linkGuest(i int) string { return fmt.Sprintf("/b%d", i) }
+
+// linkInputs lists the bundles' objects for the link: every bundle's
+// libraries first, as when bundles are built (copies of inline code they
+// share with modules are theirs), then each one's modules and registration.
+func linkInputs(metas []bundleMeta) []string {
+	var inputs []string
+	for i, meta := range metas {
+		for _, l := range meta.Libraries {
+			inputs = append(inputs, linkGuest(i)+"/"+l)
+		}
+	}
+	for i, meta := range metas {
+		for _, m := range meta.Modules {
+			inputs = append(inputs, linkGuest(i)+"/"+m.Object)
+		}
+		inputs = append(inputs, linkGuest(i)+"/registration.o")
+	}
+	return inputs
+}
+
+type bundleMeta struct {
+	Modules []struct {
+		Name   string `json:"name"`
+		Object string `json:"object"`
+	} `json:"modules"`
+	// Libraries are objects of libraries the modules share
+	// (toolchain/wasi-cc), linked before them.
+	Libraries []string `json:"libraries"`
+}
+
+var nameSeparators = regexp.MustCompile(`[-_.]+`)
+
+// normalizeName is a package name as PEP 503 compares them.
+func normalizeName(name string) string {
+	return strings.ToLower(nameSeparators.ReplaceAllString(name, "-"))
+}
 
 // bundleGuest is where the Python files of a linked interpreter's i-th
 // bundle are mounted. It's fixed, since the snapshot imports from there.
 func bundleGuest(i int) string {
 	return fmt.Sprintf("%s/bundles/%d", guestRoot, i)
-}
-
-// snapshotLinked pre-initializes home's python.wasm with the preload
-// modules imported, in the same file system layout as at runtime.
-func snapshotLinked(ctx context.Context, home string, sites, preload []string, cacheDir string) error {
-	wasmPath := filepath.Join(home, "bin", "python.wasm")
-	wasm, err := os.ReadFile(wasmPath)
-	if err != nil {
-		return err
-	}
-	r, err := newSnapshotRuntime(ctx, cacheDir)
-	if err != nil {
-		return err
-	}
-	defer r.Close(context.Background())
-	fsCfg := wazero.NewFSConfig().WithReadOnlyDirMount(home, "/")
-	var path []string
-	for i, dir := range sites {
-		fsCfg = fsCfg.WithReadOnlyDirMount(dir, bundleGuest(i))
-		path = append(path, bundleGuest(i))
-	}
-	var out tailBuffer
-	cfg := wazero.NewModuleConfig().
-		WithArgs("python").
-		WithEnv("PYTHONHOME", "/").
-		WithEnv("PYTHONDONTWRITEBYTECODE", "1").
-		WithEnv("PYTHONPATH", strings.Join(path, ":")).
-		WithEnv("PYWASI_PRELOAD", strings.Join(preload, ",")).
-		WithFSConfig(fsCfg).
-		WithStdout(&out).
-		WithStderr(&out).
-		WithSysWalltime().
-		WithSysNanotime().
-		// Real entropy, as at runtime: the snapshot keeps CPython's string
-		// hash seed.
-		WithRandSource(rand.Reader)
-	snap, err := snapshotWasm(ctx, r, wasm, cfg)
-	if err != nil {
-		return fmt.Errorf("%w: %s", err, out.String())
-	}
-	return writeFileAtomic(wasmPath, snap)
 }

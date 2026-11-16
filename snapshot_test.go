@@ -2,7 +2,6 @@ package pywasi
 
 import (
 	"bytes"
-	"reflect"
 	"testing"
 )
 
@@ -30,21 +29,5 @@ func TestAppendS64(t *testing.T) {
 		if r.s64(); r.err != nil || !bytes.Equal(r.b, []byte{0xaa}) {
 			t.Errorf("s64 after %d: %x %v", tc.v, r.b, r.err)
 		}
-	}
-}
-
-func TestDataSegments(t *testing.T) {
-	data := make([]byte, 200)
-	data[3], data[4] = 1, 1
-	data[20] = 1  // gap of 15 zeros: merged
-	data[100] = 1 // gap of 79: new segment
-	data[199] = 1 // last byte
-	got := dataSegments(data)
-	want := [][2]int{{3, 21}, {100, 101}, {199, 200}}
-	if !reflect.DeepEqual(got, want) {
-		t.Errorf("got %v, want %v", got, want)
-	}
-	if got := dataSegments(make([]byte, 64)); len(got) != 0 {
-		t.Errorf("zeros: %v", got)
 	}
 }

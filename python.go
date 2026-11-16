@@ -21,6 +21,8 @@ import (
 	"strings"
 
 	"github.com/ChrisRx/wazero"
+	"github.com/ChrisRx/wazero/api"
+	"github.com/ChrisRx/wazero/experimental"
 	"github.com/ChrisRx/wazero/imports/wasi_snapshot_preview1"
 	"github.com/ChrisRx/wazero/sys"
 	"go.chrisrx.dev/x/context"
@@ -70,15 +72,47 @@ type Python struct {
 	modules []fsMount
 	// digest identifies python.wasm (sha256 prefix), for cache keys.
 	digest string
-	// bundleSites are the Python files of linked-in bundles.
-	bundleSites []string
+	// bundleSites are the Python files of linked-in bundles, and
+	// bundleModules the top-level modules of their extensions.
+	bundleSites   []string
+	bundleModules []string
 	// boundsChecks is WithBoundsChecks.
 	boundsChecks bool
+	// tempDir is WithTempDir's directory, if tempDirSet.
+	tempDir    string
+	tempDirSet bool
+	// resumable is set if compiled can be pre-initialized, with globals its
+	// mutable globals' indices, and then image is its snapshot, if one could
+	// be taken (see image.go).
+	resumable bool
+	globals   []uint32
+	image     *image
+}
+
+// load compiles wasm as the interpreter, ready to be restored from images
+// if it can be pre-initialized.
+func (p *Python) load(ctx context.Context, wasm []byte) error {
+	code, globals, ok, err := resumable(wasm)
+	if err != nil {
+		return fmt.Errorf("pywasi: reading interpreter: %w", err)
+	}
+	compiled, err := p.runtime.CompileModule(compileContext(ctx, p.boundsChecks), code)
+	if err != nil {
+		return fmt.Errorf("pywasi: compiling interpreter: %w", err)
+	}
+	if p.compiled != nil {
+		if err := p.compiled.Close(ctx); err != nil {
+			return err
+		}
+	}
+	sum := sha256.Sum256(wasm)
+	p.compiled, p.digest, p.resumable, p.globals, p.image = compiled, hex.EncodeToString(sum[:16]), ok, globals, nil
+	return nil
 }
 
 // relink replaces the interpreter with one linked with layers' bundles.
 func (p *Python) relink(ctx context.Context, layers layers, cacheDir string) error {
-	home, sites, err := linkInterpreter(ctx, *layers.Linker, *layers.Kit, layers.Bundles, cacheDir, p.boundsChecks)
+	home, sites, modules, err := linkInterpreter(ctx, *layers.Linker, *layers.Kit, layers.Bundles, cacheDir, p.boundsChecks)
 	if err != nil {
 		return err
 	}
@@ -86,15 +120,10 @@ func (p *Python) relink(ctx context.Context, layers layers, cacheDir string) err
 	if err != nil {
 		return err
 	}
-	compiled, err := p.runtime.CompileModule(compileContext(ctx, p.boundsChecks), wasm)
-	if err != nil {
-		return fmt.Errorf("pywasi: compiling linked interpreter: %w", err)
-	}
-	if err := p.compiled.Close(ctx); err != nil {
+	if err := p.load(ctx, wasm); err != nil {
 		return err
 	}
-	sum := sha256.Sum256(wasm)
-	p.compiled, p.home, p.digest, p.bundleSites = compiled, home, hex.EncodeToString(sum[:16]), sites
+	p.home, p.bundleSites, p.bundleModules = home, sites, modules
 	return nil
 }
 
@@ -160,11 +189,7 @@ func New(ctx context.Context, options ...Option) (*Python, error) {
 		return nil, fmt.Errorf("pywasi: reading interpreter: %w", err)
 	}
 
-	// DWARF-based stack traces make every proc_exit (sys.exit with a
-	// nonzero code, os._exit, the snapshot entry point) parse the debug
-	// info of a ~40MB module: seconds per process. Function names from the
-	// name section are still used.
-	cfg := wazero.NewRuntimeConfig().WithDebugInfoEnabled(false)
+	cfg := newRuntimeConfig()
 	if opts.cacheDir != "" {
 		cache, err := wazero.NewCompilationCacheWithDir(opts.cacheDir)
 		if err != nil {
@@ -182,13 +207,14 @@ func New(ctx context.Context, options ...Option) (*Python, error) {
 		r.Close(ctx)
 		return nil, fmt.Errorf("pywasi: instantiating host functions: %w", err)
 	}
-	compiled, err := r.CompileModule(compileContext(ctx, opts.boundsChecks), wasm)
-	if err != nil {
-		r.Close(ctx)
-		return nil, fmt.Errorf("pywasi: compiling interpreter: %w", err)
+	p := &Python{
+		runtime: r, home: home, boundsChecks: opts.boundsChecks,
+		tempDir: opts.tempDir, tempDirSet: opts.tempDirSet,
 	}
-	sum := sha256.Sum256(wasm)
-	p := &Python{runtime: r, compiled: compiled, home: home, digest: hex.EncodeToString(sum[:16]), boundsChecks: opts.boundsChecks}
+	if err := p.load(ctx, wasm); err != nil {
+		r.Close(ctx)
+		return nil, err
+	}
 	// Pure-Python packages are resolved by this interpreter, before the
 	// modules are mounted.
 	site, layers, err := p.packageLayer(ctx, opts)
@@ -212,6 +238,9 @@ func New(ctx context.Context, options ...Option) (*Python, error) {
 	}
 	if site != "" {
 		p.modules = append(p.modules, fsMount{os.DirFS(site), guestRoot + "/site"})
+	}
+	if p.resumable {
+		p.image = p.snapshot(ctx, opts, site)
 	}
 	context.AddCleanup(ctx, func() {
 		if err := p.Close(); err != nil {
@@ -301,6 +330,13 @@ func (p *Python) run(ctx context.Context, opts RunOptions) (int, error) {
 			fsCfg = fsCfg.WithDirMount(host, m.Guest)
 		}
 	}
+	tmp, err := p.tempMount(opts.Mounts)
+	if err != nil {
+		return 0, err
+	}
+	if tmp != "" {
+		fsCfg = fsCfg.WithDirMount(tmp, guestTemp)
+	}
 	var pythonPath []string
 	for _, m := range p.modules {
 		fsCfg = fsCfg.WithFSMount(m.fsys, m.guest)
@@ -335,6 +371,12 @@ func (p *Python) run(ctx context.Context, opts RunOptions) (int, error) {
 	if len(pythonPath) > 0 {
 		modCfg = modCfg.WithEnv("PYTHONPATH", strings.Join(pythonPath, ":"))
 	}
+	if _, ok := opts.Env["HOME"]; tmp != "" && !ok {
+		// The temp space as the home directory too, for caches kept under ~
+		// (matplotlib's, Hugging Face's). Without HOME, ~ doesn't expand:
+		// WASI has no pwd module to look it up in.
+		modCfg = modCfg.WithEnv("HOME", guestTemp)
+	}
 	if opts.Dir != "" {
 		// Read and removed by pywasi_main.c, which changes to it.
 		modCfg = modCfg.WithEnv("PYWASI_CWD", path.Clean(opts.Dir))
@@ -351,7 +393,23 @@ func (p *Python) run(ctx context.Context, opts RunOptions) (int, error) {
 
 	ctx, restore := withTerminals(ctx, opts.Stdin, opts.Stdout, opts.Stderr)
 	defer restore()
-	mod, err := p.runtime.InstantiateModule(ctx, p.compiled, modCfg)
+	var mod api.Module
+	if p.resumable {
+		// Started here: from the snapshot, if there is one.
+		mod, err = p.runtime.InstantiateModule(ctx, p.compiled, modCfg.WithStartFunctions())
+		if err == nil {
+			entry := "_start"
+			if p.image != nil {
+				entry = resumeExport
+				err = p.image.restore(mod)
+			}
+			if err == nil {
+				_, err = mod.ExportedFunction(entry).Call(ctx)
+			}
+		}
+	} else {
+		mod, err = p.runtime.InstantiateModule(ctx, p.compiled, modCfg)
+	}
 	if mod != nil {
 		defer mod.Close(ctx)
 	}
@@ -378,4 +436,17 @@ func (p *Python) run(ctx context.Context, opts RunOptions) (int, error) {
 // uses this context for optional hooks.
 func (p *Python) Close() error {
 	return p.runtime.Close(context.Background())
+}
+
+// newRuntimeConfig is the wazero configuration pywasi runs modules with.
+//
+// DWARF-based stack traces make every proc_exit (sys.exit with a nonzero
+// code, os._exit, the snapshot entry point) parse the debug info of a
+// ~40MB module: seconds per process, so they're off. Function names from
+// the name section are still used. Exception handling is on: extension
+// modules use it for C++ exceptions and setjmp/longjmp (toolchain/wasi-cc).
+func newRuntimeConfig() wazero.RuntimeConfig {
+	return wazero.NewRuntimeConfig().
+		WithDebugInfoEnabled(false).
+		WithCoreFeatures(api.CoreFeaturesV2 | experimental.CoreFeaturesExceptionHandling)
 }

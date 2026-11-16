@@ -1,6 +1,10 @@
 package pywasi
 
-import "testing"
+import (
+	"encoding/json"
+	"slices"
+	"testing"
+)
 
 func TestPrebuiltKitHostRevision(t *testing.T) {
 	kit := func(sha string, host int) kitEntry {
@@ -37,5 +41,30 @@ func TestPrebuiltKitHostRevision(t *testing.T) {
 	}
 	if last.SHA256 != "legacy-new" {
 		t.Fatalf("old pywasi would pick %q", last.SHA256)
+	}
+}
+
+// Libraries (objects modules of a bundle share) go first, before any
+// bundle's modules; older bundles have none.
+func TestLinkInputs(t *testing.T) {
+	var metas []bundleMeta
+	for _, b := range []string{
+		`{"modules": [{"name": "numpy._core._multiarray_umath", "object": "objects/a.o"}]}`,
+		`{"modules": [{"name": "pyarrow.lib", "object": "objects/b.o"}, {"name": "pyarrow._compute", "object": "objects/c.o"}],
+		  "libraries": ["objects/lib.o"]}`,
+	} {
+		var m bundleMeta
+		if err := json.Unmarshal([]byte(b), &m); err != nil {
+			t.Fatal(err)
+		}
+		metas = append(metas, m)
+	}
+	want := []string{
+		"/b1/objects/lib.o",
+		"/b0/objects/a.o", "/b0/registration.o",
+		"/b1/objects/b.o", "/b1/objects/c.o", "/b1/registration.o",
+	}
+	if got := linkInputs(metas); !slices.Equal(got, want) {
+		t.Errorf("got %v, want %v", got, want)
 	}
 }

@@ -146,8 +146,22 @@ without network access. TCP and UDP are supported (not raw sockets,
 out with the socket's timeout.
 
 An interpreter linked by pywasi imports these host functions, so to run it
-under wasmtime, preload stubs that fail them: `wasmtime run --preload
+under wasmtime, preload stubs that fail them, and turn on exception
+handling, which extensions use: `wasmtime run -W exceptions=y --preload
 pywasi=build/pywasi-host-stub.wasm ...` (`scripts/run.sh` does this).
+
+## Temp space
+
+Each interpreter gets a writable `/tmp`, kept between runs in a private
+directory under the OS temp directory (`pywasi-<uid>-<digest>`, one per
+`python.wasm`, so a linked interpreter has its own). It's also `HOME`, unless
+`RunOptions.Env` sets one, so caches kept under `~` or in `tempfile`'s
+directory (matplotlib's font cache, Hugging Face's downloads) carry over from
+one run to the next. Every run of that interpreter by the same OS user shares
+it, concurrent ones included. Code from one run can read and change what
+another left there, so give runs that mustn't share files their own
+directory with `WithTempDir(dir)`, or none with `WithTempDir("")`. A `Mount`
+at `/tmp` takes its place for that run.
 
 ## Building your own interpreter
 
@@ -163,8 +177,14 @@ cd .. && ./scripts/build.sh myapp   # -> myapp/.pywasi/{bin/python.wasm,lib/}
 
 The first run builds CPython for WASI (a few minutes). Packages with a
 `py3-none-any` wheel are installed as-is. Everything else is compiled from
-its sdist and statically linked into `python.wasm`. Run it with the CLI, or
-from Go with `WithHome`:
+its sdist and statically linked into `python.wasm`: C and C++ through
+setuptools, meson-python or scikit-build-core (CMake), and Rust through
+maturin or setuptools-rust (PyO3), with cargo building for `wasm32-wasip1`
+and `toolchain/wasi-rust-ld` turning each extension into an object to link
+in. An extension's static constructors run when it's first imported, as
+they would when a shared library is loaded. Per-package settings (patches,
+build options, C library quirks) are in `toolchain/recipes.toml`. Run it
+with the CLI, or from Go with `WithHome`:
 
 ```sh
 go run ./cmd/pywasi -home myapp/.pywasi -mount myapp:/app -- /app/main.py
@@ -204,10 +224,12 @@ Archives are unpacked once per digest. `Source` is an interface, so they can
 come from anywhere.
 
 The default interpreter is embedded from
-`internal/stdlib/python3.14-stdlib.tar.zst`. To update it:
+`internal/stdlib/python3.14-stdlib.tar.zst`. It isn't pre-initialized, so
+that New can snapshot it with the packages a program asks for (see
+[Fast startup](#fast-startup)). To update it:
 
 ```sh
-nix develop --command ./scripts/build.sh --env --archive internal/stdlib/python3.14-stdlib.tar.zst
+nix develop --command ./scripts/build.sh --env --no-snapshot --archive internal/stdlib/python3.14-stdlib.tar.zst
 ```
 
 ## Pure-Python packages without a build
@@ -257,20 +279,29 @@ or disable it) lists:
   line, plus the standard library;
 - bundles: one per package built from source, with an object per extension
   module, an object that registers them at startup, and the package's Python
-  files.
+  files. A package whose modules share a library of its own (pyarrow's
+  `libarrow_python`, with Arrow C++ in it) has that library's object too,
+  linked once, ahead of every module, so they share its state (Arrow's
+  registries of types and compute functions).
 
 The resolver treats catalog bundles as installable versions, so numpy
 resolves to a bundle and tabulate to a wheel. New then downloads what's
 missing (all checked by sha256), links, and caches the interpreter by its
 inputs. The first time takes about 20s (downloads, compiling the linker,
 linking, and a startup snapshot with the bundles' packages imported, as in
-[Fast startup](#fast-startup)). After that `New` takes about 0.3s and an
+[Fast startup](#fast-startup), except bundles that need a pure wheel, like
+pandas with python-dateutil, which are imported at run time). After that `New` takes about 0.3s and an
 `Eval` using numpy about 30-40ms.
 
 To publish more:
 
 ```sh
-./scripts/build.sh --with numpy --with pyyaml --kit build/kit.tar.zst --bundles build/bundles
+./scripts/build.sh --with numpy --with pandas --with scipy --with scikit-learn --with matplotlib \
+  --with duckdb --with lxml --with pillow --with markupsafe --with msgpack --with pyyaml \
+  --with pydantic-core --with jiter --with orjson --with regex --with rpds-py --with tiktoken \
+  --with safetensors --with xxhash --with tokenizers --with cryptography --with 'sentencepiece==0.2.1' \
+  --with pyarrow \
+  --no-snapshot --kit build/kit.tar.zst --bundles build/bundles
 PYWASI_R2_ENV=... scripts/catalog.py --kit build/kit.tar.zst --bundle build/bundles/*.tar.zst
 ```
 
@@ -392,12 +423,24 @@ snapshot interpreter accepts `-c`, `-m`, a script, or `-` (no other flags),
 and its string hash seed is fixed at build time. Set `snapshot = false` or
 pass `--no-snapshot` to turn it off.
 
-Interpreters linked from Go (C-extension packages from the catalog) get the
-same snapshot without Wizer: after linking, New runs the initialization in
-wazero with the bundles' packages preloaded, and writes the resulting memory
-and globals back into the module (`snapshot.go`). If that fails, the
-interpreter still works without it, and the reason is in
-`snapshot-error.txt` next to it in the cache.
+The default interpreter, and interpreters linked from Go (C-extension
+packages from the catalog), are snapshotted by New instead, with the
+packages asked for already imported: those from `WithPackages` (or a
+`WithPylock` lock), the bundles' extension modules and `WithPreload`'s. New
+runs the initialization once in wazero, in the same file system layout as
+runs, and keeps the memory and globals as an image, cached per interpreter
+and set of packages (`image.go`). Runs instantiate the compiled interpreter,
+write the image in and resume, so each set of packages costs one snapshot
+(seconds), not another compile. A package that fails to import there is left
+for the run to import, and if the snapshot fails altogether runs start from
+scratch, with the reason next to where the image would be in the cache.
+
+A run from a snapshot exits without finalizing the interpreter, since its
+instance is thrown away: with large packages loaded, tearing them down took
+most of a second. What programs count on at exit still happens: `atexit`
+handlers run, and files opened with `open()` (or `pathlib`) and the standard
+streams are flushed. `__del__` methods of objects still alive at exit don't
+run.
 
 ## Example: PyYAML with libyaml
 
@@ -471,17 +514,49 @@ Native numpy uses AVX2/AVX-512 kernels for matmul and sort, and wasm SIMD is
 
 ## Limits
 
-- No Rust extensions (maturin) yet.
+- No threads (WASI preview 1): BLAS runs single-threaded, and
+  `threading.Thread.start` raises `RuntimeError`. CPython's executors and,
+  through a `sitecustomize` shipped in the standard library
+  (`toolchain/support`), anyio's worker threads (FastAPI's sync endpoints)
+  run work inline, blocking the event loop while they do. Libraries that
+  parallelize run serially: scikit-learn's `n_jobs`, tokenizers (with
+  `TOKENIZERS_PARALLELISM` defaulting to false), DuckDB, Arrow.
+- C++ exceptions and `setjmp`/`longjmp` work: extensions use wasm exception
+  handling (`experimental.CoreFeaturesExceptionHandling` in wazero, `-W
+  exceptions=y` in wasmtime). Rust's standard library for `wasm32-wasip1`
+  is built with `panic=abort`, though, so a Rust panic ends the interpreter
+  instead of raising `PanicException`.
+- `ctypes` works for memory (structures, arrays, pointers, `memmove`,
+  `string_at`), but it can only call C functions with simple signatures (up
+  to 8 integer or pointer arguments) and can't make callbacks or load
+  libraries (`CDLL` raises `OSError`; extensions are linked in).
+- `mmap` copies the file in (on wasi-libc's emulation) and can't write it
+  back, so `flush` raises. It doesn't keep the file open either (as
+  `trackfd=False`).
+- Modules WASI can't support are missing (`fcntl`, `readline`, `curses`,
+  `resource`, `pwd`, `grp`), and `subprocess` and `multiprocessing` can't
+  start processes.
+- No file locking, so SQLite and DuckDB go without (SQLite also without WAL
+  mode): don't share a database file between processes.
 - C libraries a package needs must be added to `nix/c-libs.nix` first. zlib,
-  OpenSSL, SQLite, bzip2, xz, libyaml and OpenBLAS are there now.
-- No threads (WASI preview 1), so BLAS runs single-threaded, and
-  `threading.Thread.start` raises `RuntimeError`.
-- Modules WASI can't support are missing (`ctypes`, `mmap`, `fcntl`,
-  `readline`, `curses`, `resource`, `pwd`, `grp`), and
-  `subprocess` and `multiprocessing` can't start processes.
-- SQLite has no file locking or WAL mode, so don't share a database file
-  between processes.
-- C++ exceptions abort instead of unwinding.
+  OpenSSL, SQLite, bzip2, xz, zstd, libyaml, libxml2, libxslt, libjpeg,
+  FreeType, OpenBLAS and Arrow C++ are there now.
+- Packages built here, and what they leave out (see `toolchain/recipes.toml`
+  and `toolchain/patches`):
+  - scipy: no `scipy.odr` (Fortran). `cython_lapack` lacks `chla_transtype`
+    and `xerbla_array`.
+  - Pillow: no TIFF, WebP, LCMS or the other optional libraries.
+  - safetensors: `safe_open` can't map files; `safetensors.numpy.load_file`
+    reads them instead.
+  - tokenizers: no `async_*` methods.
+  - sentencepiece: 0.2.1 (later versions generate code with protoc at
+    build time), encoding and decoding only (training needs threads).
+  - DuckDB can't install or load extensions; json, parquet, icu and
+    core_functions are built in.
+  - pyarrow: compute (regex functions included), Acero, datasets,
+    Parquet (zstd, snappy, lz4, gzip), CSV, JSON, IPC and the local
+    filesystem. No ORC, Substrait, Flight, Gandiva, Parquet encryption, or
+    S3, GCS, Azure and HDFS filesystems (`nix/arrow-wasi.nix`).
 - wasm has no floating-point exception flags. numpy's explicit errors work
   through a patch (singular matrices raise `LinAlgError`, and integer division
   by zero respects `np.errstate`), but float operations like `1.0 / 0.0` don't
@@ -504,6 +579,6 @@ task test:numpy -- _core/tests/test_multiarray.py -k sort
 `task test:numpy` builds numpy with this repo's patches plus the test-only
 extension modules that published bundles leave out, then runs each test file
 in its own interpreter. It fails only if a file crashes the interpreter or
-times out: tests that need `ctypes`, `mmap`, `os.dup`, processes or
-floating-point exception flags are expected to fail. Logs are in
+times out: tests that need `ctypes`, writable `mmap`, `os.dup`, processes
+or floating-point exception flags are expected to fail. Logs are in
 `build/numpy-tests/logs`.

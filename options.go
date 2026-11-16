@@ -32,6 +32,8 @@ type config struct {
 	catalogSet   bool
 	boundsChecks bool
 	network      network
+	tempDir      string
+	tempDirSet   bool
 }
 
 // WithNetwork lets Python use sockets: TCP and UDP, and host name
@@ -69,8 +71,12 @@ func WithDependencies(requirements ...string) Option {
 }
 
 // WithPreload lists modules (import names, e.g. "yaml" for pyyaml) to import
-// into the startup snapshot of a built interpreter. Repeated calls add to
-// the list.
+// into the startup snapshot, so runs start with them imported: the snapshot
+// of an interpreter built with WithDependencies, or the one New takes of
+// the default or a linked interpreter. The packages asked for with
+// WithPackages (and those in a WithPylock lock) are preloaded anyway, so
+// this is for others, such as their submodules. Repeated calls add to the
+// list.
 func WithPreload(modules ...string) Option {
 	return func(c *config) { c.preload = append(c.preload, modules...) }
 }
