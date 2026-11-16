@@ -22,6 +22,12 @@ extern "C" {
 #define SO_ACCEPTCONN 30
 #define SO_DOMAIN 39
 #endif
+#ifndef SO_RCVTIMEO
+/* Timeouts, with wasi-libc's wasip2 values for 32-bit longs. setsockopt
+ * fails with ENOPROTOOPT (pywasi_socket.c). */
+#define SO_RCVTIMEO 66
+#define SO_SNDTIMEO 67
+#endif
 #ifndef SOMAXCONN
 #define SOMAXCONN 128
 #endif

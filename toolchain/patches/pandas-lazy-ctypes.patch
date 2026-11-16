@@ -1,0 +1,44 @@
+pandas: import ctypes only where it's used.
+
+pandas.errors and the interchange protocol import ctypes at module level,
+and both are imported by `import pandas`. WASI has no _ctypes, and
+neither use (a Windows error message, reading interchange buffers by
+pointer) is reached in normal use.
+
+--- a/pandas/errors/__init__.py
++++ b/pandas/errors/__init__.py
+@@ -5,7 +5,6 @@
+ from __future__ import annotations
+ 
+ import abc
+-import ctypes
+ 
+ from pandas._config.config import OptionError
+ 
+@@ -823,6 +822,8 @@
+     """
+ 
+     def __init__(self, message: str) -> None:
++        import ctypes
++
+         # attr only exists on Windows, so typing fails on other platforms
+         message += f" ({ctypes.WinError()})"  # type: ignore[attr-defined]
+         super().__init__(message)
+--- a/pandas/core/interchange/from_dataframe.py
++++ b/pandas/core/interchange/from_dataframe.py
+@@ -1,6 +1,5 @@
+ from __future__ import annotations
+ 
+-import ctypes
+ import re
+ from typing import (
+     Any,
+@@ -504,6 +503,8 @@
+     if column_dtype is None:
+         raise NotImplementedError(f"Conversion for {dtype} is not yet supported.")
+ 
++    import ctypes
++
+     # TODO: No DLPack yet, so need to construct a new ndarray from the data pointer
+     # and size in the buffer plus the dtype on the column. Use DLPack as NumPy supports
+     # it since https://github.com/numpy/numpy/pull/19083

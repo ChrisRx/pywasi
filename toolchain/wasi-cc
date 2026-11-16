@@ -14,24 +14,71 @@ set -euo pipefail
 
 : "${WASI_SDK_PATH:?run inside nix develop}"
 # SIMD128 is supported by wasmtime and wazero; lets clang vectorize loops.
-target=(--target=wasm32-wasip1 --sysroot="$WASI_SDK_PATH/share/wasi-sysroot" -msimd128)
+# C++ exceptions and setjmp/longjmp use the wasm exception-handling proposal
+# in its standard form (try_table/exnref, not the legacy try/catch), which
+# wazero (experimental.CoreFeaturesExceptionHandling) and wasmtime
+# (-W exceptions=y) run. The final link adds libunwind and libsetjmp.
+# wasi-libc's emulations of mmap, signals, getpid and process clocks are
+# in every interpreter's final link, so their headers are available too.
+target=(
+  --target=wasm32-wasip1 --sysroot="$WASI_SDK_PATH/share/wasi-sysroot" -msimd128
+  -fwasm-exceptions -mllvm -wasm-enable-sjlj -mllvm -wasm-use-legacy-eh=false
+  -D_WASI_EMULATED_MMAN -D_WASI_EMULATED_SIGNAL -D_WASI_EMULATED_GETPID -D_WASI_EMULATED_PROCESS_CLOCKS
+)
 case "$(basename "$0")" in
-  *++)
-    driver="$WASI_SDK_PATH/bin/clang++"
-    # Compile C++ try/throw without the wasm exception-handling proposal,
-    # which wazero doesn't support. A throw aborts (toolchain/support/
-    # cxa_abort.c); code that relies on catching exceptions won't work.
-    target+=(-fignore-exceptions)
-    ;;
+  *++) driver="$WASI_SDK_PATH/bin/clang++" ;;
   *) driver="$WASI_SDK_PATH/bin/clang" ;;
 esac
+
+# Response files (@file, as meson passes long link lines) expanded, so
+# -shared and the inputs are seen.
+if [[ " $* " == *" @"* ]]; then
+  expanded=()
+  for a in "$@"; do
+    if [[ "$a" == @* && -f "${a#@}" ]]; then
+      mapfile -d '' -t more < <(python3 -c 'import shlex, sys; sys.stdout.write("\0".join(shlex.split(open(sys.argv[1]).read())) + "\0")' "${a#@}")
+      expanded+=("${more[@]}")
+    else
+      expanded+=("$a")
+    fi
+  done
+  set -- "${expanded[@]}"
+fi
+
+# Flags left out:
+# - -pthread (meson's threads dependency, say): no threads in wasip1, and
+#   it makes errno and other thread-locals real TLS, which doesn't link
+#   against the single-threaded wasi-libc.
+# - LTO (matplotlib turns it on): code would be generated in the
+#   relocatable link below, which gets it wrong (position-independent
+#   data addresses that corrupt memory in the final link).
+# - Position-independent code (CMake asks for it for modules and shared
+#   libraries): everything is linked statically in the end, and its
+#   relative data references fail to link once the definition they refer
+#   to is another object's (inline code shared with a library, below).
+args=()
+for a in "$@"; do
+  case "$a" in
+    -pthread | -flto | -flto=* | -ffat-lto-objects | -fno-fat-lto-objects) ;;
+    -fPIC | -fpic | -fPIE | -fpie) ;;
+    *) args+=("$a") ;;
+  esac
+done
+set -- "${args[@]}"
 
 shared=0
 for a in "$@"; do
   [ "$a" = "-shared" ] && shared=1 && break
 done
 if [ "$shared" = 0 ]; then
-  exec "$driver" "${target[@]}" "$@"
+  # Linking a program (configure checks, build tools) needs the runtime
+  # for exceptions and setjmp, and the emulations defined above, as the
+  # interpreter's final link has; compiling doesn't.
+  for a in "$@"; do
+    case "$a" in -c | -S | -E | -M | -MM) exec "$driver" "${target[@]}" "$@" ;; esac
+  done
+  exec "$driver" "${target[@]}" "$@" -lunwind -lsetjmp \
+    -lwasi-emulated-mman -lwasi-emulated-signal -lwasi-emulated-getpid -lwasi-emulated-process-clocks
 fi
 
 out=""
@@ -51,7 +98,7 @@ while [ $# -gt 0 ]; do
     -l) libs+=("$2"); shift ;;
     -l*) libs+=("${1#-l}") ;;
     *.o | *.obj) objs+=("$1") ;;
-    *.a) archives+=("$1") ;;
+    *.a | *.rlib) archives+=("$1") ;;
     *.c | *.cc | *.cpp | *.cxx) srcs+=("$1") ;;
     *) cflags+=("$1") ;;
   esac
@@ -59,17 +106,80 @@ while [ $# -gt 0 ]; do
 done
 [ -n "$out" ] || { echo "wasi-cc: -shared link without -o" >&2; exit 1; }
 
+# A package's own shared library (pyarrow's libarrow_python.so, say: an
+# output named lib*.so that isn't an extension module) becomes a relocatable
+# object too, but one that keeps its C++ symbols global, like a shared
+# library's exports, so every extension of the package uses its one copy
+# (and its registries and other global state). Its static constructors run
+# from pywasi_lib_init_*, which extensions linked against it call first.
+# The archives it took in are listed next to it (.pywasi-archives), so those
+# extensions don't take private copies of them. toolchain/pywasi_build.py
+# links such libraries in with the extension modules.
+nm="$WASI_SDK_PATH/bin/llvm-nm"
+base="$(basename "$out")"
+library=0
+if [[ "$base" == lib*.so* && "$base" != *.cpython-* && "$base" != *.abi3.* ]]; then
+  library=1
+fi
+pywasi_lib_init() {
+  [ -f "$1" ] && "$nm" --defined-only --extern-only "$1" 2>/dev/null | awk '$NF ~ /^pywasi_lib_init_/ { print $NF; exit }'
+}
+deps=()
+dep_inits=()
+rest=()
+for a in "${cflags[@]}"; do
+  if [[ "$a" == *.so || "$a" == *.so.* ]] && init="$(pywasi_lib_init "$a")" && [ -n "$init" ]; then
+    deps+=("$(realpath "$a")")
+    dep_inits+=("$init")
+  else
+    rest+=("$a")
+  fi
+done
+cflags=("${rest[@]+"${rest[@]}"}")
+rest=()
+for l in "${libs[@]+"${libs[@]}"}"; do
+  found=""
+  for d in "${libdirs[@]+"${libdirs[@]}"}"; do
+    if init="$(pywasi_lib_init "$d/lib$l.so")" && [ -n "$init" ]; then
+      deps+=("$(realpath "$d/lib$l.so")")
+      dep_inits+=("$init")
+      found=1
+      break
+    fi
+  done
+  [ -n "$found" ] || rest+=("$l")
+done
+libs=("${rest[@]+"${rest[@]}"}")
+
 # -lfoo found as a static libfoo.a in a -L dir (e.g. PYWASI_SYSROOT/lib) is
 # linked into the extension. Anything else (-lm, ...) is left for the final
 # link against wasi-libc.
-for l in "${libs[@]}"; do
-  for d in "${libdirs[@]}"; do
+for l in "${libs[@]+"${libs[@]}"}"; do
+  for d in "${libdirs[@]+"${libdirs[@]}"}"; do
     if [ -f "$d/lib$l.a" ]; then
       archives+=("$d/lib$l.a")
       break
     fi
   done
 done
+
+# Archives a library linked against already has are left out.
+absorbed=()
+for dep in "${deps[@]+"${deps[@]}"}"; do
+  [ -f "$dep.pywasi-archives" ] && mapfile -t -O "${#absorbed[@]}" absorbed <"$dep.pywasi-archives"
+done
+if [ "${#absorbed[@]}" -gt 0 ]; then
+  rest=()
+  for a in "${archives[@]+"${archives[@]}"}"; do
+    real="$(realpath "$a")"
+    skip=""
+    for b in "${absorbed[@]}"; do
+      [ "$real" = "$b" ] && skip=1 && break
+    done
+    [ -n "$skip" ] || rest+=("$a")
+  done
+  archives=("${rest[@]+"${rest[@]}"}")
+fi
 
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
@@ -80,22 +190,88 @@ for i in "${!srcs[@]}"; do
   objs+=("$tmp/$i.o")
 done
 
-# Give the module a unique exported entry point that calls its
-# PyInit_<leaf>, where <leaf> is the file name up to the first dot
-# (foo.cpython-314-wasm32-wasi.so -> foo). Unrelated packages often reuse
-# extension names (`_speedups`), so PyInit_<leaf> itself becomes local and
-# the final link registers the module through this symbol instead.
-leaf="$(basename "$out")"
+# Static constructors (C++ globals, __attribute__((constructor))) run when
+# the module is first imported, as when a shared library is loaded, not at
+# process start before Python is initialized: pybind11 globals, for one,
+# use the C API. wasm-ctors.py takes them out of each input's startup list
+# under unique names, in the order they'd have run.
+tc="$(dirname "$(realpath "$0")")"
+: >"$tmp/ctors"
+inputs=()
+for i in "${!objs[@]}"; do
+  python3 "$tc/wasm-ctors.py" "__pywasi_ctor_o${i}_" "${objs[$i]}" "$tmp/in$i.o" >>"$tmp/ctors"
+  inputs+=("$tmp/in$i.o")
+done
+for i in "${!archives[@]}"; do
+  python3 "$tc/wasm-ctors.py" "__pywasi_ctor_a${i}_" "${archives[$i]}" "$tmp/lib$i.a" >>"$tmp/ctors"
+  inputs+=("$tmp/lib$i.a")
+done
+objects=() libraries=()
+for f in "${inputs[@]}"; do
+  case "$f" in *.o) objects+=("$f") ;; *) libraries+=("$f") ;; esac
+done
+# Only constructors of archive members the link pulls in (as without
+# deferring): those a link without the entry point defines. A library
+# takes in every member (below), but the link still keeps one copy of
+# what's in a COMDAT group, as the initializers of C++ inline variables
+# are, in every translation unit using them.
+if [ "${#libraries[@]}" -gt 0 ] && [ -s "$tmp/ctors" ]; then
+  probe=("${libraries[@]}")
+  [ "$library" = 0 ] || probe=(--whole-archive "${libraries[@]}" --no-whole-archive)
+  "$WASI_SDK_PATH/bin/wasm-ld" -r -o "$tmp/probe.o" "${objects[@]}" "${probe[@]}" 2>/dev/null
+  "$WASI_SDK_PATH/bin/llvm-nm" --defined-only "$tmp/probe.o" | awk '{print $NF}' | grep '^__pywasi_ctor_' >"$tmp/linked" || true
+  awk 'NR == FNR { linked[$1] = 1; next } linked[$2]' "$tmp/linked" "$tmp/ctors" >"$tmp/ctors.linked"
+  mv "$tmp/ctors.linked" "$tmp/ctors"
+fi
+mapfile -t ctors < <(sort -s -n -k1,1 "$tmp/ctors" | cut -d' ' -f2)
+
+# Give the module a unique exported entry point that runs those once and
+# then calls its PyInit_<leaf>, where <leaf> is the file name up to the
+# first dot (foo.cpython-314-wasm32-wasi.so -> foo), or PYWASI_INIT_LEAF if
+# set (toolchain/wasi-rust-ld). Unrelated packages often reuse extension
+# names (`_speedups`), so PyInit_<leaf> itself becomes local and the final
+# link registers the module through this symbol instead.
+# A library gets pywasi_lib_init_* instead, which only runs constructors.
+# Either first initializes the libraries it's linked against.
+leaf="${PYWASI_INIT_LEAF:-$(basename "$out")}"
 leaf="${leaf%%.*}"
-entry="pywasi_init_$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')"
-printf 'extern void *PyInit_%s(void);\nvoid *%s(void) { return PyInit_%s(); }\n' \
-  "$leaf" "$entry" "$leaf" >"$tmp/entry.c"
+id="$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')"
+if [ "$library" = 1 ]; then
+  entry="pywasi_lib_init_$id"
+else
+  entry="pywasi_init_$id"
+fi
+{
+  [ "$library" = 1 ] || printf 'extern void *PyInit_%s(void);\n' "$leaf"
+  for c in "${dep_inits[@]+"${dep_inits[@]}"}" "${ctors[@]+"${ctors[@]}"}"; do
+    printf 'extern void %s(void);\n' "$c"
+  done
+  if [ "$library" = 1 ]; then
+    printf 'void %s(void) {\n' "$entry"
+  else
+    printf 'void *%s(void) {\n' "$entry"
+  fi
+  printf '    static int ran;\n    if (!ran) {\n        ran = 1;\n'
+  for c in "${dep_inits[@]+"${dep_inits[@]}"}" "${ctors[@]+"${ctors[@]}"}"; do
+    printf '        %s();\n' "$c"
+  done
+  printf '    }\n'
+  [ "$library" = 1 ] || printf '    return PyInit_%s();\n' "$leaf"
+  printf '}\n'
+} >"$tmp/entry.c"
 "$WASI_SDK_PATH/bin/clang" --target=wasm32-wasip1 --sysroot="$WASI_SDK_PATH/share/wasi-sysroot" -c "$tmp/entry.c" -o "$tmp/entry.o"
 
 # A function signature mismatch means wasm-ld replaced calls with a trap
 # (typically C code declaring a Fortran routine with a different return
 # type). Fail here rather than at runtime.
-if ! "$WASI_SDK_PATH/bin/wasm-ld" -r -o "$out" "${objs[@]}" "$tmp/entry.o" "${archives[@]}" 2>"$tmp/ld.err"; then
+# A library takes in all of its archives, as their code is for the
+# extensions linked against it to use.
+whole=()
+if [ "$library" = 1 ] && [ "${#libraries[@]}" -gt 0 ]; then
+  whole=(--whole-archive "${libraries[@]}" --no-whole-archive)
+  libraries=()
+fi
+if ! "$WASI_SDK_PATH/bin/wasm-ld" -r -o "$out" "${objects[@]}" "$tmp/entry.o" "${whole[@]+"${whole[@]}"}" "${libraries[@]+"${libraries[@]}"}" 2>"$tmp/ld.err"; then
   cat "$tmp/ld.err" >&2
   exit 1
 fi
@@ -107,4 +283,16 @@ fi
 
 # Only the entry point stays global, like a shared library's export list,
 # so private copies of helper code in different extensions don't collide.
-python3 "$(dirname "$(realpath "$0")")/wasm-localize.py" "$out" --keep "^${entry}\$"
+# A library exports its C++ symbols (and PYWASI_LIB_KEEP's, a regex), and
+# an extension linked against one shares their inline definitions.
+if [ "$library" = 1 ]; then
+  python3 "$tc/wasm-localize.py" "$out" --weaken-undefined '^__pywasi_ctor_' --keep "^${entry}\$|^_Z${PYWASI_LIB_KEEP:+|$PYWASI_LIB_KEEP}"
+  {
+    for a in "${archives[@]+"${archives[@]}"}"; do realpath "$a"; done
+    for dep in "${deps[@]+"${deps[@]}"}"; do [ -f "$dep.pywasi-archives" ] && cat "$dep.pywasi-archives"; done
+  } >"$out.pywasi-archives"
+elif [ "${#deps[@]}" -gt 0 ]; then
+  python3 "$tc/wasm-localize.py" "$out" --weaken-undefined '^__pywasi_ctor_' --keep "^${entry}\$" --keep-weak "^_Z"
+else
+  python3 "$tc/wasm-localize.py" "$out" --weaken-undefined '^__pywasi_ctor_' --keep "^${entry}\$"
+fi

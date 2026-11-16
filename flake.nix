@@ -3,10 +3,19 @@
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+    # Rust with the wasm32-wasip1 standard library, for Rust extensions.
+    rust-overlay = {
+      url = "github:oxalica/rust-overlay";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
   };
 
   outputs =
-    { self, nixpkgs }:
+    {
+      self,
+      nixpkgs,
+      rust-overlay,
+    }:
     let
       systems = [
         "x86_64-linux"
@@ -40,6 +49,10 @@
         pkgs:
         let
           pywasiPkgs = self.packages.${pkgs.stdenv.hostPlatform.system};
+          # Pinned: Rust builds are cached by TOOLCHAIN_REV, not by compiler.
+          rust = (rust-overlay.lib.mkRustBin { } pkgs).stable."1.100.0".minimal.override {
+            targets = [ "wasm32-wasip1" ];
+          };
         in
         {
           default = pkgs.mkShell {
@@ -55,6 +68,8 @@
               go-task # Taskfile.yml
               ninja
               pkg-config
+              # Rust extensions (maturin), see toolchain/wasi-rust-ld.
+              rust
 
               # WASI runtimes to test the output against.
               wasmtime
@@ -70,11 +85,15 @@
               PYWASI_SQLITE = "${pywasiPkgs.sqlite}";
               PYWASI_BZIP2 = "${pywasiPkgs.bzip2}";
               PYWASI_XZ = "${pywasiPkgs.xz}";
+              PYWASI_ZSTD = "${pywasiPkgs.zstd}";
               # CA certificates shipped with interpreters, for ssl.
               PYWASI_CACERT = "${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt";
               # Time zone database shipped with interpreters, for zoneinfo.
               PYWASI_ZONEINFO = "${pkgs.tzdata}/share/zoneinfo";
               PYWASI_SYSROOT = "${pywasiPkgs.sysroot}";
+              # libstdc++ for native manylinux wheels that build tools import
+              # (numpy for scipy's f2py), which NixOS has no system copy of.
+              PYWASI_NATIVE_LIBS = "${pkgs.stdenv.cc.cc.lib}/lib";
               UV_PYTHON = "${pkgs.python3}/bin/python3";
               UV_PYTHON_DOWNLOADS = "never";
             };

@@ -112,7 +112,7 @@ __attribute__((export_name("wizer-initialize"))) void pywasi_initialize(void) {
     }
     Py_DECREF(r);
 
-    resume_fn = PyDict_GetItemString(ns, "resume");
+    resume_fn = PyDict_GetItemString(ns, "run");
     Py_XINCREF(resume_fn);
     if (!resume_fn) {
         fatal("pywasi_snapshot.resume missing");
@@ -190,19 +190,16 @@ int main(int argc, char **argv) {
         Py_DECREF(v);
     }
 
-    int code = 0;
+    /* run() returns the exit status, having run atexit handlers and flushed
+     * files. The interpreter isn't finalized: this instance is discarded,
+     * and tearing it down is slow with large packages loaded. */
+    int code = 1;
     PyObject *r = PyObject_CallFunctionObjArgs(resume_fn, args, env, NULL);
     if (r) {
+        code = (int)PyLong_AsLong(r);
         Py_DECREF(r);
     } else {
-        /* Exits the process for SystemExit, prints a traceback otherwise. */
         PyErr_Print();
-        code = 1;
-    }
-    Py_DECREF(args);
-    Py_DECREF(env);
-    if (Py_FinalizeEx() < 0) {
-        code = 120;
     }
     return code;
 }

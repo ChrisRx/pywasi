@@ -6,6 +6,8 @@
 set -euo pipefail
 root="$(cd "$(dirname "$0")/.." && pwd)"
 dist="${PYWASI_PYTHON_DIST:-$root/dist/python}"
-export PKG_CONFIG_LIBDIR="$dist/lib/pkgconfig${PYWASI_SYSROOT:+:$PYWASI_SYSROOT/lib/pkgconfig}"
+# PYWASI_PKG_CONFIG_PATH: more, from pywasi_build.py (numpy.pc for the wasm
+# numpy build).
+export PKG_CONFIG_LIBDIR="${PYWASI_PKG_CONFIG_PATH:+$PYWASI_PKG_CONFIG_PATH:}$dist/lib/pkgconfig${PYWASI_SYSROOT:+:$PYWASI_SYSROOT/lib/pkgconfig}"
 unset PKG_CONFIG_PATH PKG_CONFIG_SYSROOT_DIR
 exec pkg-config --define-prefix "$@"

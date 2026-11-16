@@ -1,0 +1,37 @@
+safetensors: build and load files on WASI.
+
+Positional reads have no std API on wasip1, so seek and read (there are
+no threads to share the cursor with). memmap2 can't map files on WASI,
+which safe_open does, so numpy's load_file reads the file and
+deserializes it instead.
+
+--- a/bindings/python/src/lib.rs
++++ b/bindings/python/src/lib.rs
+@@ -1943,6 +1943,14 @@
+         use std::os::unix::fs::FileExt;
+         file.read_exact_at(buf, offset)
+     }
++    #[cfg(target_os = "wasi")]
++    {
++        // No threads (wasip1), so moving the file's shared cursor is safe.
++        use std::io::{Read, Seek, SeekFrom};
++        let mut f = file;
++        f.seek(SeekFrom::Start(offset))?;
++        f.read_exact(buf)
++    }
+     #[cfg(windows)]
+     {
+         use std::os::windows::fs::FileExt;
+--- a/py_src/safetensors/numpy.py
++++ b/py_src/safetensors/numpy.py
+@@ -147,6 +147,10 @@
+     loaded = load_file(file_path)
+     ```
+     """
++    if sys.platform == "wasi":
++        # safe_open maps the file, and memmap2 can't on WASI.
++        with open(filename, "rb") as f:
++            return load(f.read())
+     with safe_open(filename, framework="np", backend=backend) as f:
+         return f.get_tensors()
+ 

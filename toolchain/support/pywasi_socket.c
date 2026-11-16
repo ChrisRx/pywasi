@@ -10,6 +10,8 @@
  */
 #include <arpa/inet.h>
 #include <errno.h>
+#include <ifaddrs.h>
+#include <net/if.h>
 #include <fcntl.h>
 #include <netdb.h>
 #include <netinet/in.h>
@@ -504,4 +506,36 @@ struct hostent *gethostbyaddr(const void *addr, socklen_t len, int type) {
     host_result.h.h_length = len;
     host_result.h.h_addr_list = host_result.addr_list;
     return &host_result.h;
+}
+
+/* Network interfaces: the guest can't see the host's, so there are none
+ * (getifaddrs and if_nameindex list nothing, lookups find nothing). */
+
+int getifaddrs(struct ifaddrs **ifap) {
+    *ifap = NULL;
+    return 0;
+}
+
+void freeifaddrs(struct ifaddrs *ifa) {
+    (void)ifa;
+}
+
+unsigned int if_nametoindex(const char *name) {
+    (void)name;
+    errno = ENXIO;
+    return 0;
+}
+
+char *if_indextoname(unsigned int index, char *name) {
+    (void)index, (void)name;
+    errno = ENXIO;
+    return NULL;
+}
+
+struct if_nameindex *if_nameindex(void) {
+    return calloc(1, sizeof(struct if_nameindex));
+}
+
+void if_freenameindex(struct if_nameindex *list) {
+    free(list);
 }

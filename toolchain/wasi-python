@@ -5,13 +5,16 @@
 # sides, and sys.prefix points at dist/python so sysconfig reports the
 # wasm headers and install layout. PYTHONPATH is inherited (build tools set
 # it for code generators) minus /nix/store entries, which are native
-# packages from the dev shell.
+# packages from the dev shell. PYWASI_TARGET_PYTHONPATH goes first, for
+# modules only the wasm side should see (pywasi_build.py's build shims),
+# and PYWASI_BUILD_SITE last: the build environment's site-packages, for
+# pure-Python build tools that scripts import (pandas' versioneer).
 set -euo pipefail
 root="$(cd "$(dirname "$0")/.." && pwd)"
 dist="${PYWASI_PYTHON_DIST:-$root/dist/python}"
 
 # Forward build-tool variables (meson install scripts read MESON_*).
-pythonpath="$root/toolchain/site"
+pythonpath="${PYWASI_TARGET_PYTHONPATH:+$PYWASI_TARGET_PYTHONPATH:}$root/toolchain/site"
 IFS=: read -ra entries <<<"${PYTHONPATH:-}"
 for p in "${entries[@]}"; do
   case "$p" in
@@ -19,14 +22,23 @@ for p in "${entries[@]}"; do
     *) pythonpath+=":$p" ;;
   esac
 done
+pythonpath+="${PYWASI_BUILD_SITE:+:$PYWASI_BUILD_SITE}"
 
 passthru=()
 for name in ${!MESON_@} DESTDIR SOURCE_DATE_EPOCH; do
   [ -n "${!name+x}" ] && passthru+=(--env "$name")
 done
 
+# The guest starts in /, and sitecustomize only moves to PYWASI_CWD after
+# Python has looked for the script, so make a relative script path
+# absolute (meson runs `python3 generate_version.py`).
+if [ $# -gt 0 ] && [ "${1#-}" = "$1" ] && [ "${1#/}" = "$1" ] && [ -f "$1" ]; then
+  set -- "$PWD/$1" "${@:2}"
+fi
+
 exec wasmtime run \
   --wasm max-wasm-stack=16777216 \
+  --wasm exceptions=y \
   --dir /::/ \
   --env PYTHONHOME="$dist" \
   --env PYTHONPATH="$pythonpath" \

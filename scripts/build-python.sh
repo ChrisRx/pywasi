@@ -25,6 +25,7 @@ dist="$root/dist/python"
 : "${PYWASI_SQLITE:?run inside nix develop}"
 : "${PYWASI_BZIP2:?run inside nix develop}"
 : "${PYWASI_XZ:?run inside nix develop}"
+: "${PYWASI_ZSTD:?run inside nix develop}"
 
 mkdir -p "$src_dir" "$log_dir"
 
@@ -64,7 +65,7 @@ socket_stub="$root/build/pywasi_socket_stub.o"
 python3 Tools/wasm/wasi build-python --quiet --logdir "$log_dir"
 
 # Then the WASI host Python, with the C libraries from nix/c-libs.nix
-# (zlib, OpenSSL for ssl and hashlib, SQLite, bzip2 and xz). configure finds
+# (zlib, OpenSSL for ssl and hashlib, SQLite, bzip2, xz and zstd). configure finds
 # optional C libraries through pkg-config, which the WASI build points at
 # the (read-only) wasi-sdk sysroot, so pass them in directly. --prefix=/
 # makes the installed tree relocatable to the guest root, and the test
@@ -86,6 +87,8 @@ BZIP2_CFLAGS="-I$PYWASI_BZIP2/include" \
 BZIP2_LIBS="-L$PYWASI_BZIP2/lib -lbz2" \
 LIBLZMA_CFLAGS="-I$PYWASI_XZ/include" \
 LIBLZMA_LIBS="-L$PYWASI_XZ/lib -llzma" \
+LIBZSTD_CFLAGS="-I$PYWASI_ZSTD/include" \
+LIBZSTD_LIBS="-L$PYWASI_ZSTD/lib -lzstd" \
   python3 Tools/wasm/wasi build-host --quiet --logdir "$log_dir" -- --prefix=/ --disable-test-modules \
   --with-openssl="$PYWASI_OPENSSL" --with-tzpath=/share/zoneinfo --enable-ipv6 \
   ac_cv_func_clock_nanosleep=no ac_cv_lib_rt_clock_nanosleep=no \
@@ -96,7 +99,7 @@ host_dir="$cpython/cross-build/wasm32-wasip1"
 # configure quietly leaves out a module whose library it can't find or
 # compile against, so check that every one pywasi ships was built.
 missing=()
-for m in _bz2 _hashlib _lzma _socket _sqlite3 _ssl _zoneinfo zlib; do
+for m in _bz2 _hashlib _lzma _socket _sqlite3 _ssl _zoneinfo _zstd zlib; do
   grep -Eq "^$m( |\$)" "$host_dir/Modules/Setup.stdlib" "$host_dir/Modules/Setup.bootstrap" 2>/dev/null ||
     missing+=("$m")
 done

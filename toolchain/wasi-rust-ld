@@ -1,0 +1,58 @@
+#!/usr/bin/env bash
+# Linker for Rust extension modules (cargo's linker for wasm32-wasip1).
+#
+# rustc links a cdylib (how PyO3 builds an extension module) by running
+# wasm-ld with the crate's objects, its dependencies' rlibs and Rust's own
+# copy of wasi-libc (self-contained/). WASI has no dlopen, so instead the
+# objects and rlibs go to toolchain/wasi-cc -shared, which makes the same
+# relocatable object it does for C extensions: archives resolved in, a
+# unique pywasi_init_* entry point, everything else local. Static C
+# libraries from build scripts (-l yyjson, for orjson) go along; Rust's own
+# libc is left out, for the final link against wasi-sdk's.
+#
+# The entry point wraps PyInit_<leaf>, where <leaf> comes from the PyInit_*
+# symbol rustc exports (--export=PyInit_<leaf>), since cargo's output name
+# is the crate's, not the module's. PyO3 exports one per #[pymodule]
+# function, submodules included (tokenizers, cryptography), and then the
+# module's is the one PYWASI_PYO3_MODULE names (maturin's module-name, from
+# pywasi_build.py), or else the one named like the library.
+set -euo pipefail
+
+out=""
+exports=()
+inputs=()
+libs=()
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -o) out="$2"; shift ;;
+    --export) [[ "$2" == PyInit_* ]] && exports+=("${2#PyInit_}"); shift ;;
+    --export=PyInit_*) exports+=("${1#--export=PyInit_}") ;;
+    */self-contained/*) ;;
+    *.o | *.rlib | *.a) inputs+=("$1") ;;
+    -L) [[ "$2" == */self-contained* ]] || libs+=("-L$2"); shift ;;
+    -L*) [[ "$1" == */self-contained* ]] || libs+=("$1") ;;
+    -l) [ "$2" = c ] || libs+=("-l$2"); shift ;;
+    -lc) ;;
+    -l*) libs+=("$1") ;;
+    # Options with a separate value (wasm-ld syntax).
+    -z | -m | --export | --export-if-defined | --undefined | -mllvm) shift ;;
+    *) ;;
+  esac
+  shift
+done
+[ -n "$out" ] || { echo "wasi-rust-ld: no -o" >&2; exit 1; }
+case "${#exports[@]}" in
+  0) echo "wasi-rust-ld: no exported PyInit_* symbol for $out (not a Python extension?)" >&2; exit 1 ;;
+  1) leaf="${exports[0]}" ;;
+  *)
+    stem="${PYWASI_PYO3_MODULE:-$(basename "$out")}"
+    stem="${stem%%.*}"
+    leaf=""
+    for e in "${exports[@]}"; do
+      [ "$e" = "$stem" ] && leaf="$e"
+    done
+    [ -n "$leaf" ] || { echo "wasi-rust-ld: several PyInit_* symbols (${exports[*]}) and none named like $out" >&2; exit 1; }
+    ;;
+esac
+
+PYWASI_INIT_LEAF="$leaf" exec "$(dirname "$(realpath "$0")")/wasi-cc" -shared -o "$out" "${inputs[@]}" "${libs[@]}"

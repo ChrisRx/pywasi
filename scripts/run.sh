@@ -23,17 +23,17 @@ case "$runtime" in
     exec wasmtime run \
       "${preload[@]}" \
       --wasm max-wasm-stack=16777216 \
+      --wasm exceptions=y \
       --dir "$dist::/" \
       --env PYTHONHOME=/ \
       --argv0 /bin/python \
       "$dist/bin/python.wasm" "$@"
     ;;
   wazero)
-    exec wazero run \
-      -cachedir="$root/build/wazero-cache" \
-      -mount="$dist:/" \
-      -env=PYTHONHOME=/ \
-      "$dist/bin/python.wasm" "$@"
+    # pywasi's own command: its wazero has exception handling turned on,
+    # which extension modules use and the wazero CLI can't enable.
+    cd "$root"
+    exec go run ./cmd/pywasi -home "$dist" "$@"
     ;;
   *)
     echo "unknown runtime: $runtime" >&2

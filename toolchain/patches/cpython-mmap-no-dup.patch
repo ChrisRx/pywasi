@@ -1,0 +1,15 @@
+--- a/Modules/mmapmodule.c
++++ b/Modules/mmapmodule.c
+@@ -1929,7 +1929,12 @@
+         }
+ #endif
+     }
++#ifdef __wasi__
++    /* WASI has no dup: map without tracking the file, as trackfd=False. */
++    else if (0) {
++#else
+     else if (trackfd) {
++#endif
+         m_obj->fd = _Py_dup(fd);
+         if (m_obj->fd == -1) {
+             Py_DECREF(m_obj);

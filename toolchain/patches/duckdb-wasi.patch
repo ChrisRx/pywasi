@@ -1,0 +1,69 @@
+duckdb: build for WASI.
+
+Leave out what WASI doesn't have: other processes (kill), the CPU a
+thread runs on (sched_getcpu), resource limits (getrlimit) and file
+locks (so, as with SQLite, a database file mustn't be shared between
+processes). The terminal width comes from pywasi's terminal support
+(<termios.h>).
+
+--- a/external/duckdb/src/common/process_util.cpp
++++ b/external/duckdb/src/common/process_util.cpp
+@@ -59,6 +59,9 @@
+ 	auto running = GetExitCodeProcess(process, &exit_code) && exit_code == STILL_ACTIVE;
+ 	CloseHandle(process);
+ 	return running;
++#elif defined(__wasi__)
++	// No processes to look up (WASI): only this one.
++	return pid == getpid();
+ #else
+ 	// EPERM means it exists and belongs to somebody else
+ 	return kill(static_cast<pid_t>(pid), 0) == 0 || errno == EPERM;
+--- a/external/duckdb/src/common/printer.cpp
++++ b/external/duckdb/src/common/printer.cpp
+@@ -9,6 +9,10 @@
+ #include <io.h>
+ #else
+ #include <sys/ioctl.h>
++#ifdef __wasi__
++// pywasi's terminal support: struct winsize and TIOCGWINSZ.
++#include <termios.h>
++#endif
+ #include <stdio.h>
+ #include <unistd.h>
+ #endif
+--- a/external/duckdb/src/parallel/task_scheduler.cpp
++++ b/external/duckdb/src/parallel/task_scheduler.cpp
+@@ -367,7 +367,7 @@
+ 	// this code comes from jemalloc
+ #if defined(_WIN32)
+ 	return (idx_t)GetCurrentProcessorNumber();
+-#elif defined(_GNU_SOURCE)
++#elif defined(_GNU_SOURCE) && !defined(__wasi__)
+ 	auto cpu = sched_getcpu();
+ 	if (cpu < 0) {
+ #ifndef DUCKDB_NO_THREADS
+--- a/external/duckdb/src/main/http/http_transport_manager.cpp
++++ b/external/duckdb/src/main/http/http_transport_manager.cpp
+@@ -232,7 +232,7 @@
+ }
+ 
+ optional_idx HTTPTransportManager::GetFileDescriptorLimit() {
+-#if !defined(_WIN32) && !defined(__EMSCRIPTEN__)
++#if !defined(_WIN32) && !defined(__EMSCRIPTEN__) && !defined(__wasi__)
+ 	struct rlimit limit;
+ 	if (getrlimit(RLIMIT_NOFILE, &limit) != 0 || limit.rlim_cur == RLIM_INFINITY) {
+ 		return optional_idx();
+--- a/external/duckdb/src/common/local_file_system.cpp
++++ b/external/duckdb/src/common/local_file_system.cpp
+@@ -290,6 +290,11 @@
+ 	if (flags.Lock() == FileLockType::NO_LOCK) {
+ 		return;
+ 	}
++#ifdef __wasi__
++	// WASI has no file locks. Like SQLite there, go without: a database
++	// file mustn't be shared between processes.
++	return;
++#endif
+ 	// only attempt locking on regular files (not FIFOs/sockets)
+ 	auto file_type = StatsInternal(fd, path).file_type;
+ 	if (file_type == FileType::FILE_TYPE_FIFO || file_type == FileType::FILE_TYPE_SOCKET) {

@@ -231,6 +231,10 @@ class Provider(resolvelib.AbstractProvider):
         for version, f in self.files(name).items():
             if version not in bad and all(r.specifier.contains(version) for r in reqs):
                 out.append(Candidate(name, version, extras, file=f))
+        # Pre-releases only if no release fits or a specifier names one, as
+        # pip does (packaging's contains() allows them since 26).
+        if not any(r.specifier.prereleases for r in reqs) and any(not c.version.is_prerelease for c in out):
+            out = [c for c in out if not c.version.is_prerelease]
         return out
 
     def is_satisfied_by(self, requirement, candidate):

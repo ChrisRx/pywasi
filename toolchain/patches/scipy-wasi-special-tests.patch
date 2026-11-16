@@ -1,0 +1,116 @@
+scipy: leave scipy.special's test-only targets out on WASI.
+
+_test_internal sets rounding modes (FE_UPWARD), which wasm doesn't have,
+and the .npz test data is made by running numpy on the host Python,
+which for a wasm build is python.wasm without numpy's extensions.
+
+--- a/scipy/special/meson.build
++++ b/scipy/special/meson.build
+@@ -197,56 +197,60 @@
+   subdir: 'scipy/special'
+ )
+ 
+-py3.extension_module('_test_internal',
+-  [cython_gen.process('_test_internal.pyx'), 'dd_real_wrappers.cpp'],
+-  include_directories: ['../_lib', '../_build_utils/src'],
+-  dependencies: [xsf_dep, np_dep],
+-  link_args: version_link_args,
+-  install: true,
+-  subdir: 'scipy/special',
+-  install_tag: 'tests'
+-)
++# WASI (pywasi): wasm has no rounding modes (FE_UPWARD) for _test_internal,
++# and the test data is made by running numpy, which the build can't on wasm.
++if host_machine.system() != 'wasi'
++  py3.extension_module('_test_internal',
++    [cython_gen.process('_test_internal.pyx'), 'dd_real_wrappers.cpp'],
++    include_directories: ['../_lib', '../_build_utils/src'],
++    dependencies: [xsf_dep, np_dep],
++    link_args: version_link_args,
++    install: true,
++    subdir: 'scipy/special',
++    install_tag: 'tests'
++  )
+ 
+-py3.install_sources(
+-  '_test_internal.pyi',
+-  subdir: 'scipy/special',
+-  install_tag: 'tests'
+-)
++  py3.install_sources(
++    '_test_internal.pyi',
++    subdir: 'scipy/special',
++    install_tag: 'tests'
++  )
+ 
+-npz_files = [
+-  [
+-    '_data_boost',
+-    'tests/data/boost/assoc_legendre_p_ipp/assoc_legendre_p.txt',
+-    'boost',
+-    'boost.npz'
+-  ],
+-  [
+-    '_data_gsl',
+-    'tests/data/gsl/mathieu_ab.txt',
+-    'gsl',
+-    'gsl.npz'
+-  ],
+-  [
+-    '_data_local',
+-    'tests/data/local/ellipkm1.txt',
+-    'local',
+-    'local.npz'
+-  ],
+-]
+-
+-foreach npz_file: npz_files
+-  custom_target(npz_file[0],
+-    output: npz_file[3],
+-    input: npz_file[1],
+-    command: [
+-      py3, '@CURRENT_SOURCE_DIR@/utils/makenpz.py',
+-      '--use-timestamp', npz_file[2], '-o', '@OUTDIR@'
++  npz_files = [
++    [
++      '_data_boost',
++      'tests/data/boost/assoc_legendre_p_ipp/assoc_legendre_p.txt',
++      'boost',
++      'boost.npz'
+     ],
+-    install: true,
+-    install_dir: py3.get_install_dir() / 'scipy/special/tests/data',
+-    install_tag: 'tests',
+-  )
+-endforeach
++    [
++      '_data_gsl',
++      'tests/data/gsl/mathieu_ab.txt',
++      'gsl',
++      'gsl.npz'
++    ],
++    [
++      '_data_local',
++      'tests/data/local/ellipkm1.txt',
++      'local',
++      'local.npz'
++    ],
++  ]
++
++  foreach npz_file: npz_files
++    custom_target(npz_file[0],
++      output: npz_file[3],
++      input: npz_file[1],
++      command: [
++        py3, '@CURRENT_SOURCE_DIR@/utils/makenpz.py',
++        '--use-timestamp', npz_file[2], '-o', '@OUTDIR@'
++      ],
++      install: true,
++      install_dir: py3.get_install_dir() / 'scipy/special/tests/data',
++      install_tag: 'tests',
++    )
++  endforeach
++endif
+ 
+ 
+ python_sources = [

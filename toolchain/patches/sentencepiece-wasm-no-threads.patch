@@ -1,0 +1,21 @@
+sentencepiece: run batch work inline on WASI.
+
+The Python wrapper's ThreadPool starts a std::thread per task for batch
+encode and decode, which throws without threads (wasip1). Run each task
+where it's scheduled instead, as it already does for one thread.
+
+--- a/src/sentencepiece/sentencepiece_wrap.cxx
++++ b/src/sentencepiece/sentencepiece_wrap.cxx
+@@ -3591,7 +3591,12 @@
+ 
+   void Schedule(std::function<void()> closure) {
+     static constexpr size_t kMinThreadSize = 2;
++#ifdef __wasi__
++    // No threads in wasip1: std::thread throws.
++    if (true) {
++#else
+     if (request_size_ < kMinThreadSize) {
++#endif
+       closure();
+     } else {
+       tasks_.emplace_back(closure);

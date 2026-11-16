@@ -11,6 +11,10 @@
 #   env                 Extra environment variables for the build.
 #   patches             Files in toolchain/patches applied to the sdist
 #                       (patch -p1) before building.
+#   cflags              Extra C and C++ compiler flags.
+#   numpy-headers       true if build scripts run on the wasm python ask
+#                       numpy for its include directory (numpy.get_include),
+#                       which then gives the wasm numpy build's headers.
 
 [numpy]
 config-settings.setup-args = [
@@ -38,3 +42,68 @@ exclude-extensions = '^numpy\._core\.(_[a-z_]+_tests|_simd)$'
 # Fail instead of silently falling back to pure Python if libyaml (from
 # nix/c-libs.nix) can't be compiled against.
 env.PYYAML_FORCE_LIBYAML = "1"
+
+[pillow]
+# The libraries in nix/c-libs.nix. Fail rather than build without them.
+config-settings = { "jpeg" = "enable", "zlib" = "enable", "freetype" = "enable", "tiff" = "disable", "lcms" = "disable", "webp" = "disable", "jpeg2000" = "disable", "imagequant" = "disable", "raqm" = "disable", "xcb" = "disable", "avif" = "disable", "platform-guessing" = "disable" }
+
+[pandas]
+# pandas' meson.build asks python (python.wasm here) for numpy's headers.
+numpy-headers = true
+patches = ["pandas-lazy-ctypes.patch"]
+
+[contourpy]
+# Builds with -Werror, and wasi-sdk's newer clang warns in pybind11's headers.
+config-settings.setup-args = ["-Dwerror=false"]
+
+[sentencepiece]
+# Encoding and decoding work (batches run in turn). Training still needs
+# threads, so it fails. 0.2.2 and later build abseil, protobuf and their
+# code generators from source with CMake, which isn't set up here: use
+# sentencepiece<0.2.2.
+patches = ["sentencepiece-wasm-no-threads.patch"]
+
+[duckdb]
+# No threads in wasip1. numpy's headers for its numpy support. nanobind's
+# headers use stderr without including <cstdio>.
+numpy-headers = true
+patches = ["duckdb-wasi.patch"]
+cflags = "-include stdio.h"
+config-settings."cmake.define.DISABLE_THREADS" = "ON"
+
+[safetensors]
+# safe_open can't map files on WASI (memmap2); safetensors.numpy's
+# load_file reads them instead. Bytes (load, save) work as usual.
+patches = ["safetensors-wasi.patch"]
+
+[xxhash]
+patches = ["xxhash-wasm-method-signatures.patch"]
+
+[scipy]
+# Without Fortran (scipy.odr is left out) or Pythran, against OpenBLAS
+# (nix/c-libs.nix) and the wasm numpy's headers.
+numpy-headers = true
+config-settings.setup-args = [
+    "-D_without-fortran=true",
+    "-Duse-pythran=false",
+    "-Dblas=openblas",
+    "-Dlapack=openblas",
+]
+patches = ["scipy-wasi-special-tests.patch", "scipy-wasm-blas-int-returns.patch", "scipy-superlu-no-smp.patch"]
+
+[scikit-learn]
+# meson asks the wasm python for numpy's headers. No OpenMP (no threads).
+numpy-headers = true
+
+[tokenizers]
+# The async_* methods need tokio's threads. sitecustomize (toolchain/
+# support) turns off its rayon parallelism.
+patches = ["tokenizers-wasm-no-async.patch"]
+
+[pyarrow]
+# Against Arrow C++ in PYWASI_SYSROOT (nix/arrow-wasi.nix), built without
+# threads. libarrow_python takes in the static Arrow libraries and is
+# shared by the extension modules (see toolchain/wasi-cc).
+numpy-headers = true
+# Its CMake doesn't know wasm32 (only Emscripten's).
+config-settings."cmake.define.ARROW_CPU_FLAG" = "wasm"

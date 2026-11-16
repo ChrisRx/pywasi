@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+# pybind11-config for wasm32-wasip1 meson builds (CROSS_FILE in
+# toolchain/pywasi_build.py). The build environment's own pybind11-config
+# runs natively, and its --includes names the native Python's headers next
+# to pybind11's. meson adds the target Python's headers itself, so keep
+# only pybind11's.
+set -euo pipefail
+out="$(pybind11-config "$@")"
+for a in "$@"; do
+  if [ "$a" = "--includes" ]; then
+    kept=()
+    for flag in $out; do
+      [[ "$flag" == *pybind11* ]] && kept+=("$flag")
+    done
+    out="${kept[*]}"
+  fi
+done
+printf '%s\n' "$out"

@@ -134,7 +134,9 @@ func (p *Python) packageLayer(ctx context.Context, opts config) (string, layers,
 	reqs := slices.Clone(opts.packages)
 	slices.Sort(reqs)
 	reqs = slices.Compact(reqs)
-	key := digestJSON([]any{"v3", p.digest, reqs, string(opts.pylock), resolverKind, index, catalogURL, cat})
+	// The leading revision changes cached resolutions when the resolver
+	// does: v4 stopped picking pre-releases nobody asked for.
+	key := digestJSON([]any{"v4", p.digest, reqs, string(opts.pylock), resolverKind, index, catalogURL, cat})
 	cached := filepath.Join(data, "resolutions", key+".json")
 
 	if b, err := os.ReadFile(cached); err == nil {

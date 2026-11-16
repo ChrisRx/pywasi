@@ -39,6 +39,10 @@ stdenvNoCC.mkDerivation (
       "-DBUILD_TESTING=OFF"
       # Many C libraries still declare ancient minimum CMake versions.
       "-DCMAKE_POLICY_VERSION_MINIMUM=3.5"
+      # Relative, unlike the Nix hook's absolute ones, which installed
+      # pkg-config and CMake files prepend their prefix to.
+      "-DCMAKE_INSTALL_INCLUDEDIR=include"
+      "-DCMAKE_INSTALL_LIBDIR=lib"
     ]
     ++ cmakeFlags;
 

@@ -1,0 +1,85 @@
+diff --git a/cpp/cmake_modules/ThirdpartyToolchain.cmake b/cpp/cmake_modules/ThirdpartyToolchain.cmake
+index e8bd9dd..400d5f9 100644
+--- a/cpp/cmake_modules/ThirdpartyToolchain.cmake
++++ b/cpp/cmake_modules/ThirdpartyToolchain.cmake
+@@ -1785,10 +1785,18 @@ function(build_thrift)
+   if(CMAKE_VERSION VERSION_LESS 3.26)
+     message(FATAL_ERROR "Require CMake 3.26 or later for building bundled Apache Thrift")
+   endif()
++  # WASI has no sockets: leave out the transports and servers using them,
++  # which Parquet doesn't need.
++  set(THRIFT_PATCH_COMMAND)
++  if(CMAKE_SYSTEM_NAME STREQUAL "WASI")
++    set(THRIFT_PATCH_COMMAND PATCH_COMMAND ${CMAKE_COMMAND} -P
++                             "${CMAKE_CURRENT_LIST_DIR}/thrift-wasi.cmake")
++  endif()
+   fetchcontent_declare(thrift
+                        ${FC_DECLARE_COMMON_OPTIONS}
+                        URL ${THRIFT_SOURCE_URL}
+-                       URL_HASH "SHA256=${ARROW_THRIFT_BUILD_SHA256_CHECKSUM}")
++                       URL_HASH "SHA256=${ARROW_THRIFT_BUILD_SHA256_CHECKSUM}"
++                       ${THRIFT_PATCH_COMMAND})
+ 
+   prepare_fetchcontent()
+   set(BUILD_COMPILER OFF)
+diff --git a/cpp/cmake_modules/thrift-wasi.cmake b/cpp/cmake_modules/thrift-wasi.cmake
+new file mode 100644
+index 0000000..432ac11
+--- /dev/null
++++ b/cpp/cmake_modules/thrift-wasi.cmake
+@@ -0,0 +1,7 @@
++# Drops Apache Thrift's socket-based transports and servers from its C++
++# library, for WASI, which has no sockets. Run in Thrift's source directory.
++file(READ lib/cpp/CMakeLists.txt content)
++string(REGEX REPLACE
++       "[ \t]*src/thrift/(transport/(THttp[A-Za-z]*|TSocket[A-Za-z]*|TServerSocket|SocketCommon|TPipe[A-Za-z]*|TFileTransport)|server/[A-Za-z]*)\\.cpp\n"
++       "" content "${content}")
++file(WRITE lib/cpp/CMakeLists.txt "${content}")
+diff --git a/cpp/src/arrow/util/io_util.cc b/cpp/src/arrow/util/io_util.cc
+index 03acd82..0e2fd53 100644
+--- a/cpp/src/arrow/util/io_util.cc
++++ b/cpp/src/arrow/util/io_util.cc
+@@ -1494,7 +1494,7 @@ Status MemoryMapRemap(void* addr, size_t old_size, size_t new_size, int fildes,
+ }
+ 
+ Status MemoryAdviseWillNeed(const std::vector<MemoryRegion>& regions) {
+-#ifndef __EMSCRIPTEN__
++#if !defined(__EMSCRIPTEN__) && !defined(__wasi__)
+   const auto page_size = static_cast<size_t>(GetPageSize());
+   DCHECK_GT(page_size, 0);
+   const size_t page_mask = ~(page_size - 1);
+diff --git a/cpp/src/arrow/util/io_util.h b/cpp/src/arrow/util/io_util.h
+index fa53c0d..f200f51 100644
+--- a/cpp/src/arrow/util/io_util.h
++++ b/cpp/src/arrow/util/io_util.h
+@@ -17,7 +17,8 @@
+ 
+ #pragma once
+ 
+-#ifndef _WIN32
++// WASI emulates signal() only.
++#if !defined(_WIN32) && !defined(__wasi__)
+ #  define ARROW_HAVE_SIGACTION 1
+ #endif
+ 
+diff --git a/cpp/src/arrow/vendored/datetime/tz.cpp b/cpp/src/arrow/vendored/datetime/tz.cpp
+index 2cf6c62..cf0375f 100644
+--- a/cpp/src/arrow/vendored/datetime/tz.cpp
++++ b/cpp/src/arrow/vendored/datetime/tz.cpp
+@@ -497,6 +497,16 @@ discover_tz_dir()
+         return tz_dir_fallback;
+     else
+         throw runtime_error("discover_tz_dir failed to find zoneinfo\n");
++#  elif defined(__wasi__)
++    // TZDIR, as tzcode reads it, then the usual place, then pywasi's
++    // interpreter home, which CPython's zoneinfo uses (--with-tzpath).
++    const char* tz_dir_env = getenv("TZDIR");
++    if (tz_dir_env && stat(tz_dir_env, &sb) == 0 && S_ISDIR(sb.st_mode))
++        return tz_dir_env;
++    for (const char* dir : {"/usr/share/zoneinfo", "/share/zoneinfo"})
++        if (stat(dir, &sb) == 0 && S_ISDIR(sb.st_mode))
++            return dir;
++    throw runtime_error("discover_tz_dir failed to find zoneinfo\n");
+ #  elif !defined(__APPLE__)
+     CONSTDATA auto tz_dir_default = "/usr/share/zoneinfo";
+     CONSTDATA auto tz_dir_buildroot = "/usr/share/zoneinfo/uclibc";

@@ -1,0 +1,188 @@
+xxhash: give METH_NOARGS methods the (self, ignored) signature.
+
+CPython calls a METH_NOARGS method with two arguments. Declaring it with
+one works on native ABIs, but in wasm an indirect call checks the exact
+signature and traps on the mismatch.
+
+--- a/src/_xxhash.c
++++ b/src/_xxhash.c
+@@ -887,7 +887,7 @@
+     "far. This is a 4-byte value which may contain non-ASCII characters,\n"
+     "including null bytes.");
+ 
+-static PyObject *PYXXH32_digest(PYXXH32Object *self)
++static PyObject *PYXXH32_digest(PYXXH32Object *self, PyObject *Py_UNUSED(ignored))
+ {
+     XXH32_hash_t intdigest;
+ 
+@@ -906,7 +906,7 @@
+     "hexdigest() -> string\n\n"
+     "Like digest(), but returns the digest as a string of hexadecimal digits.");
+ 
+-static PyObject *PYXXH32_hexdigest(PYXXH32Object *self)
++static PyObject *PYXXH32_hexdigest(PYXXH32Object *self, PyObject *Py_UNUSED(ignored))
+ {
+     XXH32_hash_t intdigest;
+     char digest[XXH32_DIGESTSIZE];
+@@ -937,7 +937,7 @@
+     "Like digest(), but returns the digest as an integer, which is the integer\n"
+     "returned by the xxHash C API.");
+ 
+-static PyObject *PYXXH32_intdigest(PYXXH32Object *self)
++static PyObject *PYXXH32_intdigest(PYXXH32Object *self, PyObject *Py_UNUSED(ignored))
+ {
+     XXHASH_LOCK_ACQUIRE(self);
+     XXH32_hash_t digest = XXH32_digest(self->xxhash_state);
+@@ -950,7 +950,7 @@
+     "copy() -> xxh32 object\n\n"
+     "Return a copy of the xxh32 object.");
+ 
+-static PyObject *PYXXH32_copy(PYXXH32Object *self)
++static PyObject *PYXXH32_copy(PYXXH32Object *self, PyObject *Py_UNUSED(ignored))
+ {
+     PYXXH32Object *p;
+ 
+@@ -979,7 +979,7 @@
+     "reset()\n\n"
+     "Reset state.");
+ 
+-static PyObject *PYXXH32_reset(PYXXH32Object *self)
++static PyObject *PYXXH32_reset(PYXXH32Object *self, PyObject *Py_UNUSED(ignored))
+ {
+     XXHASH_LOCK_ACQUIRE(self);
+     XXH32_reset(self->xxhash_state, self->seed);
+@@ -1238,7 +1238,7 @@
+     "far. This is an 8-byte value which may contain non-ASCII characters,\n"
+     "including null bytes.");
+ 
+-static PyObject *PYXXH64_digest(PYXXH64Object *self)
++static PyObject *PYXXH64_digest(PYXXH64Object *self, PyObject *Py_UNUSED(ignored))
+ {
+     XXH64_hash_t intdigest;
+ 
+@@ -1257,7 +1257,7 @@
+     "hexdigest() -> string\n\n"
+     "Like digest(), but returns the digest as a string of hexadecimal digits.");
+ 
+-static PyObject *PYXXH64_hexdigest(PYXXH64Object *self)
++static PyObject *PYXXH64_hexdigest(PYXXH64Object *self, PyObject *Py_UNUSED(ignored))
+ {
+     XXH64_hash_t intdigest;
+     char digest[XXH64_DIGESTSIZE];
+@@ -1288,7 +1288,7 @@
+     "Like digest(), but returns the digest as an integer, which is the integer\n"
+     "returned by the xxHash C API.");
+ 
+-static PyObject *PYXXH64_intdigest(PYXXH64Object *self)
++static PyObject *PYXXH64_intdigest(PYXXH64Object *self, PyObject *Py_UNUSED(ignored))
+ {
+     XXHASH_LOCK_ACQUIRE(self);
+     XXH64_hash_t digest = XXH64_digest(self->xxhash_state);
+@@ -1301,7 +1301,7 @@
+     "copy() -> xxh64 object\n\n"
+     "Return a copy of the xxh64 object.");
+ 
+-static PyObject *PYXXH64_copy(PYXXH64Object *self)
++static PyObject *PYXXH64_copy(PYXXH64Object *self, PyObject *Py_UNUSED(ignored))
+ {
+     PYXXH64Object *p;
+ 
+@@ -1330,7 +1330,7 @@
+     "reset()\n\n"
+     "Reset state.");
+ 
+-static PyObject *PYXXH64_reset(PYXXH64Object *self)
++static PyObject *PYXXH64_reset(PYXXH64Object *self, PyObject *Py_UNUSED(ignored))
+ {
+     XXHASH_LOCK_ACQUIRE(self);
+     XXH64_reset(self->xxhash_state, self->seed);
+@@ -1589,7 +1589,7 @@
+     "far. This is an 8-byte value which may contain non-ASCII characters,\n"
+     "including null bytes.");
+ 
+-static PyObject *PYXXH3_64_digest(PYXXH3_64Object *self)
++static PyObject *PYXXH3_64_digest(PYXXH3_64Object *self, PyObject *Py_UNUSED(ignored))
+ {
+     XXH64_hash_t intdigest;
+ 
+@@ -1608,7 +1608,7 @@
+     "hexdigest() -> string\n\n"
+     "Like digest(), but returns the digest as a string of hexadecimal digits.");
+ 
+-static PyObject *PYXXH3_64_hexdigest(PYXXH3_64Object *self)
++static PyObject *PYXXH3_64_hexdigest(PYXXH3_64Object *self, PyObject *Py_UNUSED(ignored))
+ {
+     XXH64_hash_t intdigest;
+     char digest[XXH64_DIGESTSIZE];
+@@ -1639,7 +1639,7 @@
+     "Like digest(), but returns the digest as an integer, which is the integer\n"
+     "returned by the xxHash C API.");
+ 
+-static PyObject *PYXXH3_64_intdigest(PYXXH3_64Object *self)
++static PyObject *PYXXH3_64_intdigest(PYXXH3_64Object *self, PyObject *Py_UNUSED(ignored))
+ {
+     XXHASH_LOCK_ACQUIRE(self);
+     XXH64_hash_t intdigest = XXH3_64bits_digest(self->xxhash_state);
+@@ -1652,7 +1652,7 @@
+     "copy() -> xxh3_64 object\n\n"
+     "Return a copy of the xxh3_64 object.");
+ 
+-static PyObject *PYXXH3_64_copy(PYXXH3_64Object *self)
++static PyObject *PYXXH3_64_copy(PYXXH3_64Object *self, PyObject *Py_UNUSED(ignored))
+ {
+     PYXXH3_64Object *p;
+ 
+@@ -1688,7 +1688,7 @@
+     "reset()\n\n"
+     "Reset state.");
+ 
+-static PyObject *PYXXH3_64_reset(PYXXH3_64Object *self)
++static PyObject *PYXXH3_64_reset(PYXXH3_64Object *self, PyObject *Py_UNUSED(ignored))
+ {
+     XXHASH_LOCK_ACQUIRE(self);
+     XXH3_64bits_reset_withSeed(self->xxhash_state, self->seed);
+@@ -1947,7 +1947,7 @@
+     "far. This is a 16-byte value which may contain non-ASCII characters,\n"
+     "including null bytes.");
+ 
+-static PyObject *PYXXH3_128_digest(PYXXH3_128Object *self)
++static PyObject *PYXXH3_128_digest(PYXXH3_128Object *self, PyObject *Py_UNUSED(ignored))
+ {
+     XXH128_hash_t intdigest;
+ 
+@@ -1966,7 +1966,7 @@
+     "hexdigest() -> string\n\n"
+     "Like digest(), but returns the digest as a string of hexadecimal digits.");
+ 
+-static PyObject *PYXXH3_128_hexdigest(PYXXH3_128Object *self)
++static PyObject *PYXXH3_128_hexdigest(PYXXH3_128Object *self, PyObject *Py_UNUSED(ignored))
+ {
+     XXH128_hash_t intdigest;
+     char digest[XXH128_DIGESTSIZE];
+@@ -1997,7 +1997,7 @@
+     "Like digest(), but returns the digest as an integer, which is the integer\n"
+     "returned by the xxHash C API.");
+ 
+-static PyObject *PYXXH3_128_intdigest(PYXXH3_128Object *self)
++static PyObject *PYXXH3_128_intdigest(PYXXH3_128Object *self, PyObject *Py_UNUSED(ignored))
+ {
+     XXH128_hash_t intdigest;
+     PyObject *result, *high, *low, *sixtyfour;
+@@ -2029,7 +2029,7 @@
+     "copy() -> xxh3_128 object\n\n"
+     "Return a copy of the xxh3_128 object.");
+ 
+-static PyObject *PYXXH3_128_copy(PYXXH3_128Object *self)
++static PyObject *PYXXH3_128_copy(PYXXH3_128Object *self, PyObject *Py_UNUSED(ignored))
+ {
+     PYXXH3_128Object *p;
+ 
+@@ -2065,7 +2065,7 @@
+     "reset()\n\n"
+     "Reset state.");
+ 
+-static PyObject *PYXXH3_128_reset(PYXXH3_128Object *self)
++static PyObject *PYXXH3_128_reset(PYXXH3_128Object *self, PyObject *Py_UNUSED(ignored))
+ {
+     XXHASH_LOCK_ACQUIRE(self);
+     XXH3_128bits_reset_withSeed(self->xxhash_state, self->seed);

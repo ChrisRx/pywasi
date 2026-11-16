@@ -11,9 +11,86 @@ import sys
 
 
 def snapshot_init(preload):
+    """Import the preload modules, skipping any that fail.
+
+    pywasi preloads the packages a run asked for, which may fail to import
+    here (needing something only present at run time, say). A failed import
+    leaves the module and what it imported half-initialized, so those are
+    taken out of sys.modules again, and the run imports them itself.
+    """
     for name in preload.split(","):
-        if name := name.strip():
+        if not (name := name.strip()):
+            continue
+        before = set(sys.modules)
+        try:
             importlib.import_module(name)
+        except BaseException as e:
+            for added in set(sys.modules) - before:
+                del sys.modules[added]
+            print(f"pywasi: not preloading {name}: {type(e).__name__}: {e}", file=sys.stderr)
+
+
+def run(argv, env):
+    """Run a program from the snapshot (resume), then shut down, and return
+    the exit status.
+
+    Each run is a throwaway instance, so the interpreter isn't finalized:
+    tearing down every module and collecting the heap takes most of a second
+    with large packages preloaded, and its memory is discarded anyway. What
+    programs rely on at exit still happens: atexit handlers run (which
+    flushes logging and cleans up tempfile's directories), and files opened
+    with open() and the standard streams are flushed.
+    """
+    import atexit
+
+    opened = _track_open()
+    try:
+        resume(argv, env)
+        code = 0
+    except SystemExit as e:
+        code = _exit_status(e)
+    except BaseException:
+        sys.excepthook(*sys.exc_info())
+        code = 1
+    atexit._run_exitfuncs()
+    for f in [*opened, sys.stdout, sys.stderr]:
+        try:
+            if not f.closed:
+                f.flush()
+        except Exception:
+            pass
+    return code
+
+
+def _exit_status(e):
+    """The process exit status for SystemExit e, as CPython's."""
+    if e.code is None:
+        return 0
+    if isinstance(e.code, int):
+        return e.code & 0xFF
+    print(e.code, file=sys.stderr)
+    return 1
+
+
+def _track_open():
+    """Keep weak references to the files open() and io.open (pathlib, too)
+    return from now on, to flush the ones still open at exit."""
+    import builtins
+    import functools
+    import io
+    import weakref
+
+    opened = weakref.WeakSet()
+    original = io.open
+
+    @functools.wraps(original)
+    def open(*args, **kwargs):
+        f = original(*args, **kwargs)
+        opened.add(f)
+        return f
+
+    builtins.open = io.open = open
+    return opened
 
 
 def resume(argv, env):

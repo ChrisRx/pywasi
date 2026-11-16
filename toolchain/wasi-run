@@ -2,4 +2,4 @@
 # meson exe_wrapper: run a freshly built wasm test program.
 set -euo pipefail
 prog="$1"; shift
-exec wasmtime run --dir /::/ "$prog" "$@"
+exec wasmtime run -W exceptions=y --dir /::/ "$prog" "$@"

@@ -1,0 +1,25 @@
+scipy: keep the GIL in SuperLU when numpy has no threads.
+
+SuperLU releases the GIL while it factorizes, and its memory and error
+callbacks take it back with numpy's NPY_ALLOW_C_API. With numpy built
+without threads (NPY_NO_SMP, as for wasm) that macro does nothing, so
+they ran without a thread state, failed, and aborted the process.
+
+--- a/scipy/sparse/linalg/_dsolve/_superluobject.h
++++ b/scipy/sparse/linalg/_dsolve/_superluobject.h
+@@ -85,8 +85,15 @@
+  * be volatile, due to the use of setjmp.
+  */
+ #define SLU_BEGIN_THREADS_DEF volatile PyThreadState *_save = NULL
++#if NPY_ALLOW_THREADS
+ #define SLU_BEGIN_THREADS do { if (_save == NULL) _save = PyEval_SaveThread(); } while (0)
+ #define SLU_END_THREADS   do { if (_save) { PyEval_RestoreThread((PyThreadState*)_save); _save = NULL;} } while (0)
++#else
++/* numpy without threads (NPY_NO_SMP): NPY_ALLOW_C_API in the SuperLU
++   callbacks doesn't take the GIL back, so keep it. */
++#define SLU_BEGIN_THREADS do { (void)_save; } while (0)
++#define SLU_END_THREADS   do { (void)_save; } while (0)
++#endif
+ 
+ /*
+  * Definitions for other SuperLU data types than Z,
