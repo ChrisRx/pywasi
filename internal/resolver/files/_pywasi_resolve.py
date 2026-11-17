@@ -108,7 +108,7 @@ def select_lock(text, prebuilt):
         raise Error(f"lock requires Python {lock.requires_python}, the interpreter is {PYTHON}")
     have = installed()
     env = dict(ENV, extras=frozenset(), dependency_groups=frozenset(lock.default_groups or []))
-    out, missing = [], []
+    out, missing, other_versions = [], [], []
     for pkg in lock.packages:
         if pkg.marker and not pkg.marker.evaluate(env, context="lock_file"):
             continue
@@ -123,6 +123,10 @@ def select_lock(text, prebuilt):
         if wheel is None and any(str(pkg.version) == b["version"] for b in prebuilt.get(name, [])):
             out.append({"name": name, "version": str(pkg.version), "bundle": True})
             continue
+        if wheel is None and prebuilt.get(name):
+            versions = sorted({b["version"] for b in prebuilt[name]}, key=Version)
+            other_versions.append((name, pkg.version, versions))
+            continue
         if wheel is None:
             missing.append(f"{name}=={pkg.version}" if pkg.version else name)
             continue
@@ -131,9 +135,25 @@ def select_lock(text, prebuilt):
         out.append(
             {"name": name, "version": str(pkg.version), "filename": wheel.filename, "url": wheel.url, "sha256": wheel.hashes["sha256"]}
         )
+    problems = []
+    if other_versions:
+        problems.append(locked_other_versions(other_versions))
     if missing:
-        raise Error(no_pure_wheel(missing))
+        problems.append(no_pure_wheel(missing))
+    if problems:
+        raise Error("; ".join(problems))
     return out
+
+
+def locked_other_versions(packages):
+    """Why packages locked at versions not prebuilt for this interpreter's
+    kit can't be used, and what to do about it."""
+    have = ", ".join(f"{name} {pinned} (prebuilt: {', '.join(versions)})" for name, pinned, versions in packages)
+    names = " ".join(f"--upgrade-package {name}" for name, _, _ in packages)
+    return (
+        f"the lock has {have}: packages with C extensions link only at the versions prebuilt for this "
+        f"pywasi; lock one of those (in a uv project: allow it in pyproject.toml, then uv lock {names})"
+    )
 
 
 def no_pure_wheel(names):
