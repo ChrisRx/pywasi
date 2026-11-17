@@ -33,7 +33,7 @@ case "$runtime" in
     # pywasi's own command: its wazero has exception handling turned on,
     # which extension modules use and the wazero CLI can't enable.
     cd "$root"
-    exec go run ./cmd/pywasi -home "$dist" "$@"
+    exec go run ./cmd/pywasi --home "$dist" "$@"
     ;;
   *)
     echo "unknown runtime: $runtime" >&2

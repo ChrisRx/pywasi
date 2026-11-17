@@ -87,14 +87,14 @@ go run go.chrisrx.dev/pywasi/cmd/pywasi@latest -m http.server 8000
 ```
 
 It uses `$PYWASI_HOME` or `./.pywasi` if there is one, else the embedded
-interpreter (`-home` picks another). `-mount HOST:/GUEST` exposes more
-directories, and `-cwd=false` leaves out the current one. The prompt is
+interpreter (`--home` picks another). `--mount HOST:/GUEST` exposes more
+directories, and `--cwd=false` leaves out the current one. The prompt is
 CPython's own, with completion, history and colors: pywasi gives the guest a
 `termios` that sets the host terminal's modes. History is kept in the pywasi
 cache directory, and `PYTHON_BASIC_REPL=1` picks the basic prompt. Ctrl-C
 interrupts a line being edited, but ends pywasi while code runs, since
 signals can't reach the guest. Python can use the network, like a native
-python, and `-net=false` turns that off (see [Network](#network)). From Go, `RunOptions.Dir` sets the working directory.
+python, and `--net=false` turns that off (see [Network](#network)). From Go, `RunOptions.Dir` sets the working directory.
 
 With no interpreter options, `New` uses `$PYWASI_HOME` or `./.pywasi` if
 one exists, and otherwise the standard library interpreter embedded in the
@@ -187,7 +187,7 @@ build options, C library quirks) are in `toolchain/recipes.toml`. Run it
 with the CLI, or from Go with `WithHome`:
 
 ```sh
-go run ./cmd/pywasi -home myapp/.pywasi -mount myapp:/app -- /app/main.py
+go run ./cmd/pywasi --home myapp/.pywasi --mount myapp:/app -- /app/main.py
 ```
 
 Or let Go build it from a list of dependencies, either bare names or pinned
@@ -308,6 +308,15 @@ PYWASI_R2_ENV=... scripts/catalog.py --kit build/kit.tar.zst --bundle build/bund
 Bundles link only with a kit of the same ABI id (same CPython build and
 toolchain). A package that is neither pure Python nor in the catalog is an
 error that says so.
+
+To try packages from the catalog in a terminal, `pywasi -d` (`--deps`) lists them
+(plus some pure-Python favorites, or any requirement typed in), links an
+interpreter with the ones you pick and starts a REPL with the usual aliases
+imported (`np`, `pd`, `pa`, `plt`):
+
+```sh
+go run ./cmd/pywasi -d
+```
 
 ## Returning values and calling functions
 
@@ -580,6 +589,14 @@ task lint          # golangci-lint
 task test:numpy    # numpy's own test suite under wazero
 task test:numpy -- _core/tests/test_multiarray.py -k sort
 ```
+
+Releases are tagged by CI (`.github/workflows/tag.yml`) when commits pushed
+to main call for one, by their Conventional Commits types
+(`scripts/next-version.sh`): `feat` is a new minor version, `fix`, `perf`
+and `refactor` a patch, and before 1.0 a breaking change is a minor version
+too. `pywasi.Version()` reports the tag, or the commit's short hash between
+tags, and runs get it as `$PYWASI_VERSION`: the REPL shows it after
+CPython's build information, and `pywasi --version` prints it.
 
 `task test:numpy` builds numpy with this repo's patches plus the test-only
 extension modules that published bundles leave out, then runs each test file

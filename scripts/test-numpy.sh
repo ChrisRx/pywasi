@@ -44,7 +44,7 @@ cd "$work"
 rm -rf runner .hypothesis pytest-of-* tmp*
 cp -r "$root/toolchain/numpy-tests" runner
 if [ $# -gt 0 ]; then
-  exec "$work/pywasi" -home "$home" runner/run.py --deps deps "$@"
+  exec "$work/pywasi" --home "$home" runner/run.py --deps deps "$@"
 fi
 
 numpy="$home/lib/python3.14/site-packages/numpy"
@@ -54,7 +54,7 @@ crashed=()
 while read -r file; do
   log="$logs/$(echo "$file" | tr / _).log"
   status=0
-  timeout 900 "$work/pywasi" -home "$home" runner/run.py --deps deps "$file" >"$log" 2>&1 || status=$?
+  timeout 900 "$work/pywasi" --home "$home" runner/run.py --deps deps "$file" >"$log" 2>&1 || status=$?
   if [ "$status" = 124 ]; then
     crashed+=("$file (timed out)")
   elif grep -q 'wasm error' "$log"; then
