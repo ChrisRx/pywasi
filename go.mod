@@ -3,6 +3,7 @@ module go.chrisrx.dev/pywasi
 go 1.27.3
 
 require (
+	github.com/BurntSushi/toml v1.6.0
 	github.com/ChrisRx/wazero v0.0.0-20261116205937-3f122248aff2
 	github.com/charmbracelet/bubbles v1.0.0
 	github.com/charmbracelet/bubbletea v1.3.10

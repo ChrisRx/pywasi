@@ -111,7 +111,7 @@ go run go.chrisrx.dev/pywasi/cmd/pywasi@latest -m json.tool data.json
 go run go.chrisrx.dev/pywasi/cmd/pywasi@latest -m http.server 8000
 go run go.chrisrx.dev/pywasi/cmd/pywasi@latest -d pandas,pyarrow etl.py  # with packages
 go run go.chrisrx.dev/pywasi/cmd/pywasi@latest -r requirements.txt app.py
-go run go.chrisrx.dev/pywasi/cmd/pywasi@latest -p myapp myapp/main.py    # a uv project
+go run go.chrisrx.dev/pywasi/cmd/pywasi@latest -p myapp                  # a uv project's app
 ```
 
 Packages come from `-d` (a list, or with nothing, a picker; see below),
@@ -119,6 +119,10 @@ Packages come from `-d` (a list, or with nothing, a picker; see below),
 lines from pip-compile work, index options are ignored, and `-e` isn't
 supported), or `-p`, a uv project: its `uv.lock` (created if missing, as
 `uv run` does) and its own code, from `src/` if it has one, importable.
+Without Python arguments, `-p` runs the project's app as `uv run` would:
+its `[project.scripts]` command if it has one (`-p myapp serve --port
+8000` picks one of several by name), else its package's `__main__.py`,
+else a `main.py` at its root; `-i` gives a prompt instead.
 From Go, `WithPackages`, `WithPylock` and `WithProject` do the same. Other
 formats convert to a lock with uv: `uv pip compile --universal --format
 pylock.toml requirements.in` for `WithPylock`.

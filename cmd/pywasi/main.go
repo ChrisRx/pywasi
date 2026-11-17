@@ -60,7 +60,9 @@ type options struct {
 	project string
 	// export is where to write the interpreter instead of running it.
 	export string
-	mounts mounts
+	// interactive is -i: a prompt rather than the project's app.
+	interactive bool
+	mounts      mounts
 }
 
 // exitError carries Python's exit status out of the command.
@@ -96,7 +98,9 @@ func newCommand() *cobra.Command {
   pywasi -d pandas,pyarrow       a prompt with these packages
   pywasi -d pandas script.py     run a script with them
   pywasi -r requirements.txt     a prompt with a requirements file's packages
-  pywasi -p myapp myapp/main.py  run a script of a uv project, with its dependencies
+  pywasi -p myapp                run a uv project's app, with its dependencies
+  pywasi -p myapp serve --port 8000   run one of its [project.scripts]
+  pywasi -p myapp -i             a prompt with the project importable
   pywasi -d pandas --export py   write the interpreter to py, for other runtimes (py/run)
   PYWASI_RUNTIME=wasmtime pywasi script.py   run it with wasmtime
   pywasi script.py arg
@@ -139,7 +143,8 @@ networking, terminals and pywasi's fast startup.`,
 	f.VarP(&o.mounts, "mount", "", "mount a host directory (repeatable)")
 	f.StringSliceVarP(&o.deps, "deps", "d", nil, "packages to link in (pandas,pyarrow==26.0.1), for a prompt with them or the script; without any, pick them from the catalog in the terminal")
 	f.StringArrayVarP(&o.reqFiles, "requirement", "r", nil, "packages from a requirements file, as --deps does (repeatable)")
-	f.StringVarP(&o.project, "project", "p", "", "a uv project (the directory with its pyproject.toml): its locked dependencies, and its code on the import path")
+	f.StringVarP(&o.project, "project", "p", "", "a uv project (the directory with its pyproject.toml): its locked dependencies, its code on the import path, and without Python arguments its app: its one [project.scripts] command, its package's __main__, or its main.py")
+	f.BoolVarP(&o.interactive, "interactive", "i", false, "a prompt, rather than --project's app")
 	f.StringVar(&o.catalog, "catalog", pywasi.DefaultCatalog, "catalog of packages built for WASI, for --deps")
 	f.StringVar(&o.export, "export", "", "write the interpreter, with its packages, to this directory instead of running it: a home that runs in other runtimes (DIR/run uses wasmtime)")
 	// Documented here; splitPython hands them and what follows to Python.
@@ -184,6 +189,30 @@ func run(ctx context.Context, o *options, args []string) error {
 		reqs = append(reqs, more...)
 	}
 	deps := o.depsSet || len(o.reqFiles) > 0
+	if o.interactive && len(args) > 0 {
+		return errors.New("pywasi: -i starts a prompt; it takes no Python arguments")
+	}
+	// A project's app, as uv run has it: its script by name, or without
+	// arguments, what it declares it runs as.
+	if o.project != "" && !o.interactive {
+		dir, err := filepath.Abs(o.project)
+		if err != nil {
+			return err
+		}
+		a, err := projectApp(dir)
+		if err != nil {
+			return err
+		}
+		if len(args) == 0 {
+			if args, err = a.args(); err != nil {
+				return err
+			}
+		} else if target, ok := a.scripts[args[0]]; ok && !isFile(args[0]) {
+			// A file of that name is the script to run, but not a
+			// directory: often the project's own, named as its command.
+			args = scriptArgs(args[0], target, args[1:])
+		}
+	}
 	interactive := term.IsTerminal(int(os.Stdin.Fd()))
 	// A prompt, Python's own or one started with --deps' aliases.
 	prompt := len(args) == 0 && interactive

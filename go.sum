@@ -1,3 +1,5 @@
+github.com/BurntSushi/toml v1.6.0 h1:dRaEfpa2VI55EwlIW72hMRHdWouJeRF7TPYhI+AUQjk=
+github.com/BurntSushi/toml v1.6.0/go.mod h1:ukJfTF/6rtPPRCnwkur4qwRxa8vTRFBF0uk2lLoLwho=
 github.com/ChrisRx/wazero v0.0.0-20261116205937-3f122248aff2 h1:pR7XkDOfMLcE4cZfJusRbsF+wOoropkqQTK1gjVVWhA=
 github.com/ChrisRx/wazero v0.0.0-20261116205937-3f122248aff2/go.mod h1:FD4DCVOcDFGvOqL4aMGadFN5jGl0ugpsz7Czuiy1PLM=
 github.com/atotto/clipboard v0.1.4 h1:EH0zSVneZPSuFR11BlR9YppQTVDbh5+16AmcJi4g1z4=
