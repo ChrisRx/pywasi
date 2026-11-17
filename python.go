@@ -23,6 +23,7 @@ import (
 	"github.com/ChrisRx/wazero"
 	"github.com/ChrisRx/wazero/api"
 	"github.com/ChrisRx/wazero/experimental"
+	"github.com/ChrisRx/wazero/experimental/sysfs"
 	"github.com/ChrisRx/wazero/imports/wasi_snapshot_preview1"
 	"github.com/ChrisRx/wazero/sys"
 	"go.chrisrx.dev/x/context"
@@ -336,6 +337,9 @@ func (p *Python) run(ctx context.Context, opts RunOptions) (int, error) {
 	}
 	if tmp != "" {
 		fsCfg = fsCfg.WithDirMount(tmp, guestTemp)
+	}
+	if !slices.ContainsFunc(opts.Mounts, func(m Mount) bool { return path.Clean(m.Guest) == guestDev }) {
+		fsCfg = fsCfg.(sysfs.FSConfig).WithSysFSMount(devFS{}, guestDev)
 	}
 	var pythonPath []string
 	for _, m := range p.modules {

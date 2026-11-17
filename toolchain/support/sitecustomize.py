@@ -1,5 +1,5 @@
-"""pywasi: fixes for pure-Python packages that assume threads or shared
-libraries.
+"""pywasi: fixes for pure-Python packages that assume threads, shared
+libraries or file descriptors WASI doesn't have.
 
 WASI preview 1 has no threads, so threading.Thread.start raises. CPython's
 own executors run work inline here (toolchain/patches/cpython-*). This does
@@ -16,6 +16,15 @@ they're first imported:
   it finds nothing, as on a platform it doesn't know.
 - tokenizers (Hugging Face) parallelizes with a thread pool unless
   TOKENIZERS_PARALLELISM says not to, so that defaults to false.
+- pytest captures output by duplicating file descriptors, which WASI can't
+  (os.dup fails), so it captures sys.stdout and sys.stderr instead (as
+  --capture=sys), and its faulthandler plugin, which duplicates stderr
+  for a handler WASI has no signals to run, does nothing.
+
+os.getuid and friends, which WASI leaves out, return 0, the owner WASI
+reports for every file (pytest's tmp_path checks that its directory is the
+user's). os.umask, also missing, keeps the mask it's given, which nothing
+applies: WASI has no permission bits (pytest's cache sets one).
 
 Shipped in the standard library directory, so a sitecustomize earlier on
 sys.path takes its place.
@@ -42,9 +51,21 @@ def _patch_threadpoolctl(module):
     module.ThreadpoolController._load_libraries = lambda self: None
 
 
+def _patch_pytest_capture(module):
+    get = module._get_multicapture
+    module._get_multicapture = lambda method: get("sys" if method == "fd" else method)
+
+
+def _patch_pytest_faulthandler(module):
+    module.pytest_configure = lambda config: None
+    module.pytest_unconfigure = lambda config: None
+
+
 _PATCHES = {
     "anyio._backends._asyncio": _patch_anyio_asyncio,
     "threadpoolctl": _patch_threadpoolctl,
+    "_pytest.capture": _patch_pytest_capture,
+    "_pytest.faulthandler": _patch_pytest_faulthandler,
 }
 
 
@@ -79,3 +100,15 @@ if sys.platform == "wasi":
 
     sys.meta_path.insert(0, _PatchingFinder())
     os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+    for _name in ("getuid", "geteuid", "getgid", "getegid"):
+        if not hasattr(os, _name):
+            setattr(os, _name, lambda: 0)
+
+    if not hasattr(os, "umask"):
+        _umask = [0o022]
+
+        def umask(mask, /):
+            old, _umask[0] = _umask[0], mask
+            return old
+
+        os.umask = umask

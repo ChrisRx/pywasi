@@ -536,6 +536,11 @@ Native numpy uses AVX2/AVX-512 kernels for matmul and sort, and wasm SIMD is
 - Modules WASI can't support are missing (`fcntl`, `readline`, `curses`,
   `resource`, `pwd`, `grp`), and `subprocess` and `multiprocessing` can't
   start processes.
+- Runs have a `/dev` with `null`, `zero` and `urandom` (a `Mount` at `/dev`
+  replaces it). `os.getuid` and friends return 0, the owner WASI reports for
+  every file, and `os.umask` keeps a mask nothing applies. pytest works
+  as-is: file descriptors can't be duplicated, so it captures `sys.stdout`
+  and `sys.stderr` (as `--capture=sys`), and its faulthandler plugin is off.
 - No file locking, so SQLite and DuckDB go without (SQLite also without WAL
   mode): don't share a database file between processes.
 - C libraries a package needs must be added to `nix/c-libs.nix` first. zlib,
