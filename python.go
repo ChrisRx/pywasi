@@ -59,6 +59,8 @@ type RunOptions struct {
 type fsMount struct {
 	fsys  fs.FS
 	guest string
+	// host is the host directory fsys is, if it is one (for Command).
+	host string
 }
 
 var _ io.Closer = (*Python)(nil)
@@ -68,6 +70,10 @@ type Python struct {
 	runtime  wazero.Runtime
 	compiled wazero.CompiledModule
 	home     string
+	// wasmPath is python.wasm's host path.
+	wasmPath string
+	// runner is WithRunner's: runs go to it instead of wazero.
+	runner Runner
 	// modules are WithModule and WithModules file systems, linked-in
 	// bundles' Python files and pure-Python packages, in PYTHONPATH order.
 	modules []fsMount
@@ -125,6 +131,7 @@ func (p *Python) relink(ctx context.Context, layers layers, cacheDir string) err
 		return err
 	}
 	p.home, p.bundleSites, p.bundleModules = home, sites, modules
+	p.wasmPath = filepath.Join(home, "bin", "python.wasm")
 	return nil
 }
 
@@ -209,12 +216,27 @@ func New(ctx context.Context, options ...Option) (*Python, error) {
 		return nil, fmt.Errorf("pywasi: instantiating host functions: %w", err)
 	}
 	p := &Python{
-		runtime: r, home: home, boundsChecks: opts.boundsChecks,
+		runtime: r, home: home, wasmPath: wasmPath, boundsChecks: opts.boundsChecks,
 		tempDir: opts.tempDir, tempDirSet: opts.tempDirSet,
 	}
 	if err := p.load(ctx, wasm); err != nil {
 		r.Close(ctx)
 		return nil, err
+	}
+	// A uv project: its lock, and its code as modules.
+	var projectSrc string
+	if opts.project != "" {
+		if len(opts.packages) > 0 || opts.pylock != nil {
+			r.Close(ctx)
+			return nil, errors.New("pywasi: use WithProject, WithPackages or WithPylock, not more than one")
+		}
+		lock, src, err := exportProject(ctx, opts.project)
+		if err != nil {
+			r.Close(ctx)
+			return nil, err
+		}
+		opts.pylock = lock
+		projectSrc = src
 	}
 	// Pure-Python packages are resolved by this interpreter, before the
 	// modules are mounted.
@@ -232,15 +254,24 @@ func New(ctx context.Context, options ...Option) (*Python, error) {
 		}
 	}
 	for i, fsys := range modules {
-		p.modules = append(p.modules, fsMount{fsys, fmt.Sprintf("%s/modules/%d", guestRoot, i)})
+		p.modules = append(p.modules, fsMount{fsys: fsys, guest: fmt.Sprintf("%s/modules/%d", guestRoot, i)})
 	}
 	for i, dir := range p.bundleSites {
-		p.modules = append(p.modules, fsMount{os.DirFS(dir), bundleGuest(i)})
+		p.modules = append(p.modules, fsMount{fsys: os.DirFS(dir), guest: bundleGuest(i), host: dir})
 	}
 	if site != "" {
-		p.modules = append(p.modules, fsMount{os.DirFS(site), guestRoot + "/site"})
+		p.modules = append(p.modules, fsMount{fsys: os.DirFS(site), guest: guestRoot + "/site", host: site})
 	}
-	if p.resumable {
+	if projectSrc != "" {
+		// First on the import path, as uv run has it.
+		p.modules = append([]fsMount{{fsys: os.DirFS(projectSrc), guest: guestRoot + "/project", host: projectSrc}}, p.modules...)
+	}
+	// Only wazero starts from snapshots, and pywasi's own runs while making
+	// the interpreter (resolving packages) need it, its networking above all,
+	// so the runner takes over from here.
+	if opts.runner != nil {
+		p.runner = opts.runner
+	} else if p.resumable {
 		p.image = p.snapshot(ctx, opts, site)
 	}
 	context.AddCleanup(ctx, func() {
@@ -316,47 +347,37 @@ func checkMounts(mounts []Mount) error {
 }
 
 func (p *Python) run(ctx context.Context, opts RunOptions) (int, error) {
-	if opts.Dir != "" && !path.IsAbs(opts.Dir) {
-		return 0, fmt.Errorf("pywasi: RunOptions.Dir %q must be an absolute guest path", opts.Dir)
-	}
-	fsCfg := wazero.NewFSConfig().WithReadOnlyDirMount(p.home, "/")
-	for _, m := range opts.Mounts {
-		host, err := filepath.Abs(m.Host)
-		if err != nil {
-			return 0, err
-		}
-		if m.ReadOnly {
-			fsCfg = fsCfg.WithReadOnlyDirMount(host, m.Guest)
-		} else {
-			fsCfg = fsCfg.WithDirMount(host, m.Guest)
-		}
-	}
-	tmp, err := p.tempMount(opts.Mounts)
+	pl, err := p.plan(opts)
 	if err != nil {
 		return 0, err
 	}
-	if tmp != "" {
-		fsCfg = fsCfg.WithDirMount(tmp, guestTemp)
-	}
-	if !slices.ContainsFunc(opts.Mounts, func(m Mount) bool { return path.Clean(m.Guest) == guestDev }) {
-		fsCfg = fsCfg.(sysfs.FSConfig).WithSysFSMount(devFS{}, guestDev)
-	}
-	var pythonPath []string
-	for _, m := range p.modules {
-		fsCfg = fsCfg.WithFSMount(m.fsys, m.guest)
-		pythonPath = append(pythonPath, m.guest)
-	}
-	for _, m := range opts.fsMounts {
-		fsCfg = fsCfg.WithFSMount(m.fsys, m.guest)
+	if p.runner != nil {
+		cmd, err := p.command(pl, opts)
+		if err != nil {
+			return 0, err
+		}
+		defer cmd.Close()
+		return p.runner.Run(ctx, cmd)
 	}
 
+	fsCfg := wazero.NewFSConfig().WithReadOnlyDirMount(p.home, "/")
+	for _, m := range pl.mounts {
+		switch {
+		case m.host == "":
+			fsCfg = fsCfg.WithFSMount(m.fsys, m.guest)
+		case m.readOnly:
+			fsCfg = fsCfg.WithReadOnlyDirMount(m.host, m.guest)
+		default:
+			fsCfg = fsCfg.WithDirMount(m.host, m.guest)
+		}
+	}
+	if pl.dev {
+		fsCfg = fsCfg.(sysfs.FSConfig).WithSysFSMount(devFS{}, guestDev)
+	}
 	modCfg := wazero.NewModuleConfig().
 		// Instances are anonymous so concurrent runs don't collide on name.
 		WithName("").
-		WithArgs(append([]string{"python"}, opts.Args...)...).
-		WithEnv("PYTHONHOME", "/").
-		// No writable pycache inside the read-only home mount.
-		WithEnv("PYTHONDONTWRITEBYTECODE", "1").
+		WithArgs(pl.args...).
 		WithFSConfig(fsCfg).
 		WithSysWalltime().
 		WithSysNanotime().
@@ -364,29 +385,8 @@ func (p *Python) run(ctx context.Context, opts RunOptions) (int, error) {
 		// wazero's default random source is deterministic; Python's
 		// os.urandom, hash seeds and numpy's default_rng need real entropy.
 		WithRandSource(rand.Reader)
-	for k, v := range opts.Env {
-		if k == "PYTHONPATH" && len(pythonPath) > 0 {
-			// The caller's entries come first.
-			pythonPath = append([]string{v}, pythonPath...)
-			continue
-		}
-		modCfg = modCfg.WithEnv(k, v)
-	}
-	if len(pythonPath) > 0 {
-		modCfg = modCfg.WithEnv("PYTHONPATH", strings.Join(pythonPath, ":"))
-	}
-	if _, ok := opts.Env["HOME"]; tmp != "" && !ok {
-		// The temp space as the home directory too, for caches kept under ~
-		// (matplotlib's, Hugging Face's). Without HOME, ~ doesn't expand:
-		// WASI has no pwd module to look it up in.
-		modCfg = modCfg.WithEnv("HOME", guestTemp)
-	}
-	if _, ok := opts.Env["PYWASI_VERSION"]; !ok {
-		modCfg = modCfg.WithEnv("PYWASI_VERSION", Version())
-	}
-	if opts.Dir != "" {
-		// Read and removed by pywasi_main.c, which changes to it.
-		modCfg = modCfg.WithEnv("PYWASI_CWD", path.Clean(opts.Dir))
+	for _, kv := range pl.env {
+		modCfg = modCfg.WithEnv(kv[0], kv[1])
 	}
 	if opts.Stdin != nil {
 		modCfg = modCfg.WithStdin(opts.Stdin)

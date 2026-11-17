@@ -12,9 +12,11 @@ linters:
         - (io.Closer).Close
         - (io.ReadCloser).Close
         - (*os.File).Close
+        - (io/fs.File).Close
         - (*archive/zip.ReadCloser).Close
         - (*go.chrisrx.dev/pywasi.Python).Close
         - (*go.chrisrx.dev/pywasi.Session).Close
+        - (*go.chrisrx.dev/pywasi.Command).Close
         - (*io.PipeWriter).Close
         - (github.com/ChrisRx/wazero.Runtime).Close
         - (github.com/ChrisRx/wazero.CompiledModule).Close

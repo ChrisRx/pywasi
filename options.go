@@ -26,6 +26,8 @@ type config struct {
 	archive      Source
 	packages     []string
 	pylock       []byte
+	project      string
+	runner       Runner
 	resolver     Resolver
 	index        string
 	catalog      string
