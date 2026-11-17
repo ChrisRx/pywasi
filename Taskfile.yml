@@ -21,10 +21,21 @@ tasks:
     cmds:
       - "{{.NIX}} go test -short -count=1 {{.CLI_ARGS}} ./..."
 
+  test:wasmtime:
+    desc: Run the tests of runtime/wasmtime (its own module, with cgo)
+    dir: runtime/wasmtime
+    cmds:
+      - "{{.NIX}} env CGO_ENABLED=1 go test -count=1 -timeout 30m {{.CLI_ARGS}} ./..."
+
   test:numpy:
     desc: Run numpy's test suite under wazero, or one pytest run with args, e.g. task test:numpy -- _core/tests/test_multiarray.py -k sort
     cmds:
       - "{{.NIX}} scripts/test-numpy.sh {{.CLI_ARGS}}"
+
+  host-stub:
+    desc: Rebuild internal/hoststub/pywasi-host-stub.wasm (pywasi's host functions, failing, for other runtimes)
+    cmds:
+      - "{{.NIX}} sh -c '$WASI_SDK_PATH/bin/clang --target=wasm32 -nostdlib -O2 -Wl,--no-entry toolchain/support/pywasi_host_stub.c -o internal/hoststub/pywasi-host-stub.wasm'"
 
   lint:
     desc: Run golangci-lint

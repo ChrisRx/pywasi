@@ -1,0 +1,35 @@
+# Tags a release of the runtime/wasmtime module (runtime/wasmtime/vX.Y.Z)
+# when commits pushed to main change it and call for one, by their
+# Conventional Commits types (see scripts/next-version.sh).
+name: Tag runtime/wasmtime
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "runtime/wasmtime/**"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: tag-runtime-wasmtime
+  cancel-in-progress: false
+
+jobs:
+  tag:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Tag the release
+        run: |
+          tag=$(scripts/next-version.sh runtime/wasmtime)
+          if [ -z "$tag" ]; then
+            echo "No release: no feat, fix, perf, refactor, revert or breaking commits to runtime/wasmtime since its last tag."
+            exit 0
+          fi
+          git tag "$tag"
+          git push origin "$tag"
+          echo "Tagged $tag" >> "$GITHUB_STEP_SUMMARY"

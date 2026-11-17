@@ -1,11 +1,14 @@
-# Tags a release when commits pushed to main call for one (by their
-# Conventional Commits types, see scripts/next-version.sh), so pywasi has
-# versions to show (pywasi.Version, the REPL's banner) and to depend on.
+# Tags a release of the root module when commits pushed to main call for
+# one (by their Conventional Commits types, see scripts/next-version.sh),
+# so pywasi has versions to show (pywasi.Version, the REPL's banner) and
+# to depend on. Nested modules have their own workflows (tag-*.yml).
 name: Tag
 
 on:
   push:
     branches: [main]
+    paths-ignore:
+      - "runtime/wasmtime/**"
 
 permissions:
   contents: write
