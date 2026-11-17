@@ -79,6 +79,26 @@ PyPI (pure Python) or from prebuilt bundles (numpy), so this needs no
 compiler either. See [Pure-Python packages](#pure-python-packages-without-a-build)
 and [Packages with C extensions](#packages-with-c-extensions-still-without-a-build).
 
+Interpreters run in pywasi's own [wazero](https://wazero.io) by default.
+To run them in [wasmtime](https://wasmtime.dev) instead, in-process, add
+its runner, a module of its own since it needs cgo (Linux and macOS):
+
+```sh
+go get go.chrisrx.dev/pywasi/runtime/wasmtime
+```
+
+```go
+r, err := wasmtime.New() // go.chrisrx.dev/pywasi/runtime/wasmtime
+if err != nil {
+	log.Fatal(err)
+}
+py, err := pywasi.New(ctx, pywasi.WithRunner(r), pywasi.WithPackages("numpy"))
+```
+
+`Run`, `Eval`, `Call` and sessions then go to wasmtime, without what only
+pywasi's wazero provides (networking, terminals, fast startup): see
+[Other runtimes](#other-runtimes).
+
 There's also a command for running the interpreter directly, like a native
 `python`: with an interactive prompt when given no arguments, and in the
 current directory, which it mounts at the same path:
