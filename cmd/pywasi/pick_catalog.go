@@ -107,22 +107,6 @@ func items(c *catalog) (list []item, python string) {
 	return list, python
 }
 
-// dependencies are a bundle's requirements without extras and markers
-// (optional ones, mostly), by name.
-func dependencies(requires []string) []string {
-	var out []string
-	for _, r := range requires {
-		if strings.Contains(r, "extra ==") {
-			continue
-		}
-		name := strings.FieldsFunc(r, func(c rune) bool { return strings.ContainsRune(" ;<>=!~[(", c) })
-		if len(name) > 0 && !slices.Contains(out, name[0]) {
-			out = append(out, name[0])
-		}
-	}
-	return out
-}
-
 // bundleCache is where pywasi keeps downloaded bundles, by sha256.
 func bundleCache() string {
 	if dir := os.Getenv("PYWASI_CACHE"); dir != "" {

@@ -4,6 +4,11 @@ Run Python in Go, C extensions like numpy included. CPython is compiled to
 WASI and runs in [wazero](https://wazero.io), so there's no cgo and nothing
 to install: the default interpreter is embedded in the package.
 
+![pywasi -d: picking pandas and duckdb, then querying a DataFrame with DuckDB](docs/picker.gif)
+
+`pywasi -d` above: pick packages built for WASI, and get a REPL with them,
+linked on the fly ([more](#packages-with-c-extensions-still-without-a-build)).
+
 ## Quick start
 
 ```sh
@@ -312,7 +317,8 @@ error that says so.
 To try packages from the catalog in a terminal, `pywasi -d` (`--deps`) lists them
 (plus some pure-Python favorites, or any requirement typed in), links an
 interpreter with the ones you pick and starts a REPL with the usual aliases
-imported (`np`, `pd`, `pa`, `plt`):
+imported (`np`, `pd`, `pa`, `plt`). What your picks pull in is checked too,
+in a lighter color (their dependencies, from the catalog or PyPI):
 
 ```sh
 go run ./cmd/pywasi -d

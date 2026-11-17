@@ -25,18 +25,19 @@ const (
 )
 
 var (
-	accent   = lipgloss.AdaptiveColor{Light: "#5A3FC0", Dark: "#B4A2FF"}
-	green    = lipgloss.AdaptiveColor{Light: "#1E7A3C", Dark: "#7EE2A0"}
-	muted    = lipgloss.AdaptiveColor{Light: "#6B6B76", Dark: "#8A8A96"}
-	red      = lipgloss.AdaptiveColor{Light: "#B3261E", Dark: "#FF8A80"}
-	title    = lipgloss.NewStyle().Bold(true).Foreground(accent)
-	dim      = lipgloss.NewStyle().Foreground(muted)
-	section  = lipgloss.NewStyle().Bold(true).MarginTop(1)
-	current  = lipgloss.NewStyle().Bold(true)
-	checked  = lipgloss.NewStyle().Foreground(accent)
-	cachedOK = lipgloss.NewStyle().Foreground(green)
-	errStyle = lipgloss.NewStyle().Foreground(red)
-	key      = lipgloss.NewStyle().Foreground(accent)
+	accent    = lipgloss.AdaptiveColor{Light: "#5A3FC0", Dark: "#B4A2FF"}
+	green     = lipgloss.AdaptiveColor{Light: "#1E7A3C", Dark: "#7EE2A0"}
+	muted     = lipgloss.AdaptiveColor{Light: "#6B6B76", Dark: "#8A8A96"}
+	red       = lipgloss.AdaptiveColor{Light: "#B3261E", Dark: "#FF8A80"}
+	title     = lipgloss.NewStyle().Bold(true).Foreground(accent)
+	dim       = lipgloss.NewStyle().Foreground(muted)
+	section   = lipgloss.NewStyle().Bold(true).MarginTop(1)
+	current   = lipgloss.NewStyle().Bold(true)
+	checked   = lipgloss.NewStyle().Foreground(accent)
+	comesWith = lipgloss.NewStyle().Foreground(lipgloss.AdaptiveColor{Light: "#A8A0CC", Dark: "#5E5679"})
+	cachedOK  = lipgloss.NewStyle().Foreground(green)
+	errStyle  = lipgloss.NewStyle().Foreground(red)
+	key       = lipgloss.NewStyle().Foreground(accent)
 )
 
 type logMsg string
@@ -59,6 +60,13 @@ type model struct {
 	width   int
 	height  int
 
+	// known are packages' dependencies (normalized names): bundles' from
+	// the catalog, others' fetched from PyPI as the selection needs them.
+	known    map[string][]string
+	fetching map[string]bool
+	// by is, for each package the selection pulls in, what needs it.
+	by map[string][]string
+
 	send    func(tea.Msg)
 	link    func(reqs []string, log io.Writer) (*pywasi.Python, error)
 	started time.Time
@@ -73,12 +81,45 @@ func newModel(list []item, python, catalogURL string) *model {
 	sp := spinner.New()
 	sp.Spinner = spinner.Dot
 	sp.Style = lipgloss.NewStyle().Foreground(accent)
-	m := &model{items: list, python: python, catalog: catalogURL, input: in, spinner: sp}
+	m := &model{
+		items: list, python: python, catalog: catalogURL, input: in, spinner: sp,
+		known: map[string][]string{}, fetching: map[string]bool{},
+	}
+	for _, it := range list {
+		if it.kind == bundle {
+			m.known[normalize(it.name)] = it.requires
+		}
+	}
 	m.refilter()
 	return m
 }
 
-func (m *model) Init() tea.Cmd { return nil }
+func (m *model) Init() tea.Cmd { return m.refreshDeps() }
+
+// refreshDeps works out what the selection pulls in, fetching the
+// dependencies of packages that aren't in the catalog from PyPI.
+func (m *model) refreshDeps() tea.Cmd {
+	var selected []string
+	for _, it := range m.selected() {
+		selected = append(selected, requirementName(it.name))
+	}
+	by, missing := implied(selected, m.known, m.fetching)
+	m.by = by
+	var cmds []tea.Cmd
+	for _, name := range missing {
+		m.fetching[name] = true
+		cmds = append(cmds, pypiDependencies(name))
+	}
+	return tea.Batch(cmds...)
+}
+
+// neededBy is what in the selection needs it, if it isn't selected itself.
+func (m *model) neededBy(it item) []string {
+	if it.selected {
+		return nil
+	}
+	return m.by[requirementName(it.name)]
+}
 
 func (m *model) selected() []item {
 	var out []item
@@ -128,6 +169,10 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case logMsg:
 		m.logs = append(m.logs, string(msg))
 		return m, nil
+	case depsMsg:
+		m.known[msg.name] = msg.deps
+		delete(m.fetching, msg.name)
+		return m, m.refreshDeps()
 	case linkedMsg:
 		if msg.err != nil {
 			m.state, m.err = failed, msg.err
@@ -163,7 +208,7 @@ func (m *model) key(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.state = picking
 			m.input.Blur()
 			m.refilter()
-			return m, nil
+			return m, m.refreshDeps()
 		}
 		var cmd tea.Cmd
 		m.input, cmd = m.input.Update(msg)
@@ -202,6 +247,7 @@ func (m *model) key(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			it := &m.items[m.shown[m.cursor]]
 			it.selected = !it.selected
 		}
+		return m, m.refreshDeps()
 	case "/":
 		m.state = filtering
 		m.input.Placeholder = "filter"
@@ -216,6 +262,7 @@ func (m *model) key(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		for i := range m.items {
 			m.items[i].selected = false
 		}
+		return m, m.refreshDeps()
 	case "enter":
 		return m, m.start()
 	}
@@ -277,8 +324,11 @@ func (m *model) View() string {
 	if len(m.shown) > 0 {
 		it := m.items[m.shown[m.cursor]]
 		info := it.desc
-		if len(it.requires) > 0 {
-			info += " · needs " + strings.Join(it.requires, ", ")
+		if by := m.neededBy(it); len(by) > 0 {
+			info += " · comes with " + strings.Join(by, ", ")
+		}
+		if deps := m.known[requirementName(it.name)]; len(deps) > 0 {
+			info += " · needs " + strings.Join(deps, ", ")
 		}
 		if it.cached {
 			info += " · downloaded"
@@ -292,8 +342,12 @@ func (m *model) View() string {
 	case adding:
 		b.WriteString(key.Render("  + ") + m.input.View() + dim.Render("   enter add · esc cancel"))
 	default:
+		count := fmt.Sprint(n)
+		if d := len(m.by); d > 0 {
+			count += fmt.Sprintf(" + %d deps", d)
+		}
 		b.WriteString(help("space", "select") + help("/", "filter") + help("+", "add") + help("c", "clear") +
-			help("enter", fmt.Sprintf("start (%d)", n)) + help("q", "quit"))
+			help("enter", "start ("+count+")") + help("q", "quit"))
 	}
 	return b.String()
 }
@@ -305,8 +359,11 @@ func (m *model) row(it item, here bool) string {
 	if here {
 		cursor = key.Render("▸ ")
 	}
-	if it.selected {
-		box = checked.Render("[x]")
+	switch {
+	case it.selected:
+		box = checked.Render("[✓]")
+	case len(m.neededBy(it)) > 0:
+		box = comesWith.Render("[✓]")
 	}
 	name := fmt.Sprintf("%-16s", it.name)
 	if here {

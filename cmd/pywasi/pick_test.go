@@ -72,10 +72,61 @@ func TestAddRequirement(t *testing.T) {
 
 func TestDependencies(t *testing.T) {
 	got := dependencies([]string{
-		"numpy>=1.26", "python-dateutil>=2.8.2", "tzdata ; sys_platform == 'win32'",
-		"pytest ; extra == 'test'", "numpy[extra]",
+		"numpy>=1.26", "python_dateutil>=2.8.2", "tzdata ; sys_platform == 'win32'",
+		"pytest ; extra == 'test'", "numpy[extra]", "typing-extensions ; python_version < '3.15'",
+		"uvloop ; platform_python_implementation == 'PyPy'", "Jinja2 @ https://example.com/j.whl",
 	})
-	if strings.Join(got, ",") != "numpy,python-dateutil,tzdata" {
+	if strings.Join(got, ",") != "numpy,python-dateutil,typing-extensions,jinja2" {
 		t.Errorf("got %v", got)
+	}
+}
+
+func TestImplied(t *testing.T) {
+	known := map[string][]string{
+		"pandas":          {"numpy", "python-dateutil"},
+		"python-dateutil": {"six"},
+		"six":             nil,
+		"numpy":           nil,
+		"scikit-learn":    {"numpy", "scipy"},
+	}
+	by, missing := implied([]string{"pandas", "scikit-learn", "numpy"}, known, map[string]bool{})
+	if strings.Join(by["python-dateutil"], ",") != "pandas" || strings.Join(by["six"], ",") != "pandas" {
+		t.Errorf("by %v", by)
+	}
+	if _, ok := by["numpy"]; ok {
+		t.Errorf("numpy is selected, not implied: %v", by)
+	}
+	if strings.Join(missing, ",") != "scipy" {
+		t.Errorf("missing %v", missing)
+	}
+}
+
+// Packages the selection pulls in get a lighter mark, and are counted.
+func TestImpliedMarks(t *testing.T) {
+	m := newModel([]item{
+		{name: "numpy", version: "2.5.5", desc: "arrays", kind: bundle},
+		{name: "pandas", version: "3.1.1", desc: "data frames", kind: bundle, requires: []string{"numpy", "python-dateutil"}},
+		{name: "fastapi", desc: "web APIs", kind: pure},
+		{name: "pydantic-core", version: "2.50.4", desc: "core", kind: bundle},
+	}, "3.14.10", "example.com/index.json")
+	press(m, "j", " ") // pandas
+	m.Update(depsMsg{name: "python-dateutil", deps: []string{"six"}})
+	m.Update(depsMsg{name: "six"})
+	if got := strings.Join(m.neededBy(m.items[0]), ","); got != "pandas" {
+		t.Errorf("numpy needed by %q", got)
+	}
+	press(m, "j", " ") // fastapi
+	m.Update(depsMsg{name: "fastapi", deps: []string{"pydantic", "starlette"}})
+	m.Update(depsMsg{name: "pydantic", deps: []string{"pydantic-core"}})
+	if got := strings.Join(m.neededBy(m.items[3]), ","); got != "fastapi" {
+		t.Errorf("pydantic-core needed by %q", got)
+	}
+	if v := m.View(); !strings.Contains(v, "start (2 + 6 deps)") {
+		t.Errorf("view:\n%s", v)
+	}
+	// Selecting a package that came along makes it selected.
+	press(m, "g", " ")
+	if len(m.neededBy(m.items[0])) != 0 || !m.items[0].selected {
+		t.Error("numpy not selected")
 	}
 }
