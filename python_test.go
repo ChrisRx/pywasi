@@ -55,7 +55,7 @@ func TestNumpyDemo(t *testing.T) {
 		t.Fatalf("exit %d\nstderr:\n%s", code, errOut)
 	}
 	for _, want := range []string{
-		"numpy 2.5.4",
+		"numpy " + lockedVersion(t, "numpy"),
 		"eigvals = [2.+0.j 5.+0.j]",
 		"solve = [0.1 0.6]",
 		"fft peak bin = 5",
@@ -66,6 +66,21 @@ func TestNumpyDemo(t *testing.T) {
 			t.Errorf("output missing %q:\n%s", want, out)
 		}
 	}
+}
+
+// lockedVersion is the version of a package in the example's uv.lock.
+func lockedVersion(t *testing.T, name string) string {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join(appDir, "uv.lock"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, rest, ok := strings.Cut(string(b), "\nname = \""+name+"\"\nversion = \"")
+	if !ok {
+		t.Fatalf("%s isn't in %s/uv.lock", name, appDir)
+	}
+	version, _, _ := strings.Cut(rest, "\"")
+	return version
 }
 
 func TestExitCodeAndStdin(t *testing.T) {
