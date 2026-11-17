@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -34,6 +35,10 @@ func pick(ctx context.Context, catalogURL string, link func(reqs []string, log i
 	m.send = p.Send
 	if _, err := p.Run(); err != nil {
 		return nil, nil, err
+	}
+	// Reported once the terminal is back: only remembering it failed.
+	if m.saveErr != nil {
+		fmt.Fprintln(os.Stderr, "pywasi: remembering the selection:", m.saveErr)
 	}
 	if m.py == nil {
 		return nil, nil, nil
@@ -87,7 +92,7 @@ func sessionArgs(selected []item) []string {
 	var names []string
 	for _, it := range selected {
 		names = append(names, it.name)
-		if a, ok := aliases[it.name]; ok {
+		if a, ok := aliases[requirementName(it.name)]; ok {
 			imports = append(imports, a)
 		}
 	}
@@ -118,20 +123,20 @@ func selectionFile() string {
 	return filepath.Join(dir, "selection.json")
 }
 
-func saveSelection(selected []item) {
+func saveSelection(selected []item) error {
 	file := selectionFile()
 	if file == "" {
-		return
+		return nil
 	}
 	var names []string
 	for _, it := range selected {
 		names = append(names, it.name)
 	}
-	// Best effort: it's only a convenience, and the terminal is the
-	// picker's.
-	if b, err := json.Marshal(names); err == nil {
-		_ = os.WriteFile(file, b, 0o600)
+	b, err := json.Marshal(names)
+	if err != nil {
+		return err
 	}
+	return os.WriteFile(file, b, 0o600)
 }
 
 // restoreSelection selects what was selected last time, adding the

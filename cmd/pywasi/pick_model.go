@@ -72,6 +72,7 @@ type model struct {
 	started time.Time
 	logs    []string
 	err     error
+	saveErr error
 	py      *pywasi.Python
 }
 
@@ -276,7 +277,7 @@ func (m *model) start() tea.Cmd {
 	for _, it := range m.selected() {
 		reqs = append(reqs, it.requirement())
 	}
-	saveSelection(m.selected())
+	m.saveErr = saveSelection(m.selected())
 	m.state, m.started, m.logs = linking, time.Now(), nil
 	send, link := m.send, m.link
 	build := func() tea.Msg {

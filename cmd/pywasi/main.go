@@ -6,6 +6,8 @@
 //
 //	go run ./cmd/pywasi                        # interactive prompt
 //	go run ./cmd/pywasi -d                     # pick packages, then a prompt with them
+//	go run ./cmd/pywasi -d pandas,pyarrow      # a prompt with these packages
+//	go run ./cmd/pywasi -d pandas script.py    # run a script with them
 //	go run ./cmd/pywasi -c 'print(1 + 1)'
 //	go run ./cmd/pywasi -m http.server 8000
 //	go run ./cmd/pywasi --home examples/numpy-app/.pywasi -c 'import numpy; print(numpy.__version__)'
@@ -20,6 +22,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -46,8 +49,18 @@ func (m *mounts) Set(v string) error {
 // options are the command's flags.
 type options struct {
 	home, cache, catalog string
-	cwd, net, deps       bool
-	mounts               mounts
+	cwd, net             bool
+	// deps are the packages for --deps; picking them in the terminal if
+	// it's given without any.
+	deps    []string
+	depsSet bool
+	// reqFiles are requirements files (-r), for --deps too.
+	reqFiles []string
+	// project is a uv project to run with its dependencies.
+	project string
+	// export is where to write the interpreter instead of running it.
+	export string
+	mounts mounts
 }
 
 // exitError carries Python's exit status out of the command.
@@ -57,7 +70,7 @@ func (e exitError) Error() string { return fmt.Sprintf("exit status %d", int(e))
 
 func main() {
 	cmd := newCommand()
-	flags, python := splitPython(cmd.Flags(), os.Args[1:])
+	flags, python := splitPython(cmd.Flags(), bareDeps(cmd.Flags(), os.Args[1:]))
 	cmd.SetArgs(flags)
 	if python != nil {
 		cmd.SetContext(context.WithValue(context.Background(), pythonArgs{}, python))
@@ -80,6 +93,12 @@ func newCommand() *cobra.Command {
 		Use: "pywasi [flags] [script [args...]]",
 		Example: `  pywasi                         interactive prompt
   pywasi -d                      pick packages, then a prompt with them
+  pywasi -d pandas,pyarrow       a prompt with these packages
+  pywasi -d pandas script.py     run a script with them
+  pywasi -r requirements.txt     a prompt with a requirements file's packages
+  pywasi -p myapp myapp/main.py  run a script of a uv project, with its dependencies
+  pywasi -d pandas --export py   write the interpreter to py, for other runtimes (py/run)
+  PYWASI_RUNTIME=wasmtime pywasi script.py   run it with wasmtime
   pywasi script.py arg
   pywasi -c 'print(1 + 1)'
   pywasi -m http.server 8000`,
@@ -88,7 +107,11 @@ func newCommand() *cobra.Command {
 $PYWASI_HOME or .pywasi if it exists, else the embedded standard library
 interpreter.
 
--c and -m end pywasi's flags, as in python: what follows goes to Python.`,
+-c and -m end pywasi's flags, as in python: what follows goes to Python.
+
+$PYWASI_RUNTIME picks the runtime that runs it: wazero (pywasi's own, the
+default) or wasmtime (on PATH, or a path to it), which goes without
+networking, terminals and pywasi's fast startup.`,
 		Version:       pywasi.Version(),
 		Args:          cobra.ArbitraryArgs,
 		SilenceUsage:  true,
@@ -97,6 +120,7 @@ interpreter.
 			if python, ok := cmd.Context().Value(pythonArgs{}).([]string); ok {
 				args = python
 			}
+			o.depsSet = cmd.Flags().Changed("deps")
 			err := run(cmd.Context(), &o, args)
 			if err != nil && !errors.As(err, new(exitError)) {
 				fmt.Fprintln(os.Stderr, err)
@@ -113,8 +137,11 @@ interpreter.
 	f.BoolVar(&o.cwd, "cwd", true, "mount the current directory at the same path (/cwd on Windows) and start in it")
 	f.BoolVar(&o.net, "net", true, "let Python use the network: listen, connect and resolve host names")
 	f.VarP(&o.mounts, "mount", "", "mount a host directory (repeatable)")
-	f.BoolVarP(&o.deps, "deps", "d", false, "pick packages from the catalog in the terminal, then start a prompt with them (linked on the fly)")
+	f.StringSliceVarP(&o.deps, "deps", "d", nil, "packages to link in (pandas,pyarrow==26.0.1), for a prompt with them or the script; without any, pick them from the catalog in the terminal")
+	f.StringArrayVarP(&o.reqFiles, "requirement", "r", nil, "packages from a requirements file, as --deps does (repeatable)")
+	f.StringVarP(&o.project, "project", "p", "", "a uv project (the directory with its pyproject.toml): its locked dependencies, and its code on the import path")
 	f.StringVar(&o.catalog, "catalog", pywasi.DefaultCatalog, "catalog of packages built for WASI, for --deps")
+	f.StringVar(&o.export, "export", "", "write the interpreter, with its packages, to this directory instead of running it: a home that runs in other runtimes (DIR/run uses wasmtime)")
 	// Documented here; splitPython hands them and what follows to Python.
 	f.StringP("command", "c", "", "run a program passed in as a string, like python -c; the arguments after it go to the program")
 	f.StringP("module", "m", "", "run library module as a script, like python -m; the arguments after it go to the module")
@@ -129,16 +156,53 @@ func run(ctx context.Context, o *options, args []string) error {
 	if o.net {
 		opts = append(opts, pywasi.WithNetwork(nil))
 	}
+	runner, err := runtimeFromEnv()
+	if err != nil {
+		return err
+	}
+	if runner != nil {
+		opts = append(opts, pywasi.WithRunner(runner))
+	}
+	if o.export != "" && len(args) > 0 {
+		return errors.New("pywasi: --export writes the interpreter; it takes no Python arguments")
+	}
 	var py *pywasi.Python
-	var err error
-	if o.deps {
+	var reqs []string
+	for _, d := range o.deps {
+		if d = strings.TrimSpace(d); d != "" {
+			reqs = append(reqs, d)
+		}
+	}
+	for _, file := range o.reqFiles {
+		more, notes, err := readRequirements(file)
+		if err != nil {
+			return fmt.Errorf("pywasi: %w", err)
+		}
+		for _, n := range notes {
+			fmt.Fprintln(os.Stderr, "pywasi:", n)
+		}
+		reqs = append(reqs, more...)
+	}
+	deps := o.depsSet || len(o.reqFiles) > 0
+	interactive := term.IsTerminal(int(os.Stdin.Fd()))
+	// A prompt, Python's own or one started with --deps' aliases.
+	prompt := len(args) == 0 && interactive
+	mnts := o.mounts
+	switch {
+	case (deps || o.project != "") && o.home != "":
+		return errors.New("pywasi: --deps, -r and --project link their own interpreter; they can't use --home")
+	case deps && o.project != "":
+		return errors.New("pywasi: --project has its dependencies in its lock; it can't take --deps or -r too (add them to the project)")
+	case o.project != "":
+		py, err = pywasi.New(ctx, append(opts, pywasi.WithProject(o.project))...)
+	case deps && len(reqs) == 0 && len(o.reqFiles) > 0:
+		return errors.New("pywasi: the requirements files have no packages")
+	case deps && len(reqs) == 0:
 		switch {
-		case o.home != "":
-			return errors.New("pywasi: --deps links its own interpreter; it can't use --home")
 		case len(args) > 0:
-			return errors.New("pywasi: --deps starts a prompt; it takes no Python arguments")
-		case !term.IsTerminal(int(os.Stdin.Fd())):
-			return errors.New("pywasi: --deps needs a terminal")
+			return errors.New("pywasi: --deps without packages picks them for a prompt; it takes no Python arguments (give the packages: -d pandas,pyarrow script.py)")
+		case !interactive:
+			return errors.New("pywasi: --deps without packages picks them in the terminal; give the packages instead: -d pandas,pyarrow")
 		}
 		py, args, err = pick(ctx, o.catalog, func(reqs []string, log io.Writer) (*pywasi.Python, error) {
 			return pywasi.New(ctx, append(opts, pywasi.WithPackages(reqs...), pywasi.WithBuildLog(log))...)
@@ -146,13 +210,29 @@ func run(ctx context.Context, o *options, args []string) error {
 		if err == nil && py == nil {
 			return nil // Quit without picking.
 		}
-	} else {
+	case deps:
+		py, err = linkDeps(ctx, opts, reqs)
+		if err == nil && prompt {
+			var selected []item
+			for _, r := range reqs {
+				selected = append(selected, item{name: r})
+			}
+			args = sessionArgs(selected)
+		}
+	default:
 		py, err = pywasi.New(ctx, opts...)
 	}
 	if err != nil {
 		return err
 	}
 	defer py.Close()
+	if o.export != "" {
+		if err := py.Export(o.export); err != nil {
+			return err
+		}
+		fmt.Fprintf(os.Stderr, "pywasi: wrote %s: run it with %s/run (wasmtime), or pywasi --home %s\n", o.export, o.export, o.export)
+		return nil
+	}
 
 	env := map[string]string{}
 	// What the REPL and colored output look at.
@@ -161,8 +241,7 @@ func run(ctx context.Context, o *options, args []string) error {
 			env[k] = v
 		}
 	}
-	mnts := o.mounts
-	if (len(args) == 0 || o.deps) && term.IsTerminal(int(os.Stdin.Fd())) {
+	if prompt {
 		if file, ok := mountHistory(&mnts); ok {
 			env["PYTHON_HISTORY"] = file
 		}
@@ -170,6 +249,16 @@ func run(ctx context.Context, o *options, args []string) error {
 	var dir string
 	if o.cwd {
 		dir = mountWorkingDirectory(&mnts)
+	}
+	// A project's scripts are run by path, so it's mounted at its own path
+	// unless the current directory's mount has it.
+	if o.project != "" {
+		if abs, err := filepath.Abs(o.project); err == nil {
+			wd, _ := os.Getwd()
+			if dir == "" || !within(abs, wd) {
+				mnts = append(mnts, pywasi.Mount{Host: abs, Guest: filepath.ToSlash(abs)})
+			}
+		}
 	}
 	code, err := py.Run(ctx, pywasi.RunOptions{
 		Args:   args,
@@ -187,6 +276,76 @@ func run(ctx context.Context, o *options, args []string) error {
 		return exitError(code)
 	}
 	return nil
+}
+
+// linkDeps links an interpreter with reqs, saying so on a terminal while it
+// does (the first time takes a while).
+func linkDeps(ctx context.Context, opts []pywasi.Option, reqs []string) (*pywasi.Python, error) {
+	status := term.IsTerminal(int(os.Stderr.Fd()))
+	if status {
+		fmt.Fprintf(os.Stderr, "pywasi: linking an interpreter with %s...", strings.Join(reqs, ", "))
+	}
+	py, err := pywasi.New(ctx, append(opts, pywasi.WithPackages(reqs...))...)
+	if status {
+		fmt.Fprint(os.Stderr, "\r\x1b[K")
+	}
+	return py, err
+}
+
+// bareDeps makes -d or --deps given without packages explicit, --deps=
+// (picking them in the terminal, or with -r), since a flag's value can't be
+// optional otherwise: last, before another flag, or before a file or
+// directory, which is Python's (the script), as no package list is. Only
+// pywasi's own flags are looked at, as splitPython does.
+func bareDeps(fs *pflag.FlagSet, args []string) []string {
+	out := slices.Clone(args)
+	for i := 0; i < len(out); i++ {
+		a := out[i]
+		if a == "--" || a == "-" || !strings.HasPrefix(a, "-") {
+			break
+		}
+		if a == "-d" || a == "--deps" {
+			if i+1 == len(out) || strings.HasPrefix(out[i+1], "-") || exists(out[i+1]) {
+				out[i] = "--deps="
+			} else {
+				i++ // Its packages.
+			}
+			continue
+		}
+		f, hasValue := lookupFlag(fs, a)
+		if f == nil {
+			continue
+		}
+		if f.Name == "command" || f.Name == "module" {
+			break
+		}
+		if !hasValue && f.NoOptDefVal == "" {
+			i++ // Skip the flag's value.
+		}
+	}
+	return out
+}
+
+// exists is whether path is a file or directory.
+func exists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
+}
+
+// within is whether dir is base or under it.
+func within(dir, base string) bool {
+	rel, err := filepath.Rel(base, dir)
+	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+}
+
+// lookupFlag finds the flag an argument (--name, --name=v, -x, -xv or
+// -x=v) is, and whether the argument holds its value.
+func lookupFlag(fs *pflag.FlagSet, a string) (f *pflag.Flag, hasValue bool) {
+	if long, ok := strings.CutPrefix(a, "--"); ok {
+		name, _, hasValue := strings.Cut(long, "=")
+		return fs.Lookup(name), hasValue
+	}
+	return fs.ShorthandLookup(a[1:2]), len(a) > 2
 }
 
 // historyGuest is where the REPL's history file is mounted.

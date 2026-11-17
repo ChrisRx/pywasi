@@ -89,7 +89,19 @@ go run go.chrisrx.dev/pywasi/cmd/pywasi@latest script.py
 go run go.chrisrx.dev/pywasi/cmd/pywasi@latest -c 'print(open("data.txt").read())'
 go run go.chrisrx.dev/pywasi/cmd/pywasi@latest -m json.tool data.json
 go run go.chrisrx.dev/pywasi/cmd/pywasi@latest -m http.server 8000
+go run go.chrisrx.dev/pywasi/cmd/pywasi@latest -d pandas,pyarrow etl.py  # with packages
+go run go.chrisrx.dev/pywasi/cmd/pywasi@latest -r requirements.txt app.py
+go run go.chrisrx.dev/pywasi/cmd/pywasi@latest -p myapp myapp/main.py    # a uv project
 ```
+
+Packages come from `-d` (a list, or with nothing, a picker; see below),
+`-r` (a requirements file, as pip reads them: `-r` includes and `--hash`
+lines from pip-compile work, index options are ignored, and `-e` isn't
+supported), or `-p`, a uv project: its `uv.lock` (created if missing, as
+`uv run` does) and its own code, from `src/` if it has one, importable.
+From Go, `WithPackages`, `WithPylock` and `WithProject` do the same. Other
+formats convert to a lock with uv: `uv pip compile --universal --format
+pylock.toml requirements.in` for `WithPylock`.
 
 It uses `$PYWASI_HOME` or `./.pywasi` if there is one, else the embedded
 interpreter (`--home` picks another). `--mount HOST:/GUEST` exposes more
@@ -324,6 +336,12 @@ in a lighter color (their dependencies, from the catalog or PyPI):
 go run ./cmd/pywasi -d
 ```
 
+Give it the packages to skip picking: `-d pandas,pyarrow` starts the REPL
+with them, and with a script, `-c` or `-m` runs that instead
+(`pywasi -d pandas,pyarrow etl.py`). What follows `-d` is the package list
+unless it's another flag or an existing file or directory: then `-d` has
+no packages (`pywasi -d etl.py` is the picker and a script, an error).
+
 ## Returning values and calling functions
 
 `Eval` runs code and decodes the value of its last expression, like a
@@ -527,6 +545,46 @@ thread (`OMP_NUM_THREADS=1`), pinned to one performance core, best of 3 runs:
 Native numpy uses AVX2/AVX-512 kernels for matmul and sort, and wasm SIMD is
 128 bits wide.
 
+## Other runtimes
+
+pywasi runs interpreters in its own wazero, which brings networking,
+terminals, `/dev` and the snapshots that start them with their packages
+imported. They are WASI modules, though, so other runtimes with exception
+handling can run them too, with pywasi's host functions failing
+(`pywasi.HostStub`: sockets get ENOSYS, and the prompt is the basic one).
+pywasi still resolves and links packages itself.
+
+From the command line, `PYWASI_RUNTIME=wasmtime` runs with wasmtime's
+command (on PATH, or give its path), everything else as usual:
+
+```sh
+PYWASI_RUNTIME=wasmtime pywasi -d pandas etl.py
+```
+
+`--export DIR` writes the interpreter, with its packages, to a directory
+instead of running it: one self-contained home, with a `run` script that
+starts it with wasmtime. It's a pywasi home too (`pywasi --home DIR`).
+
+```sh
+pywasi -d pandas,pyarrow --export py
+py/run -c 'import pyarrow; print(pyarrow.__version__)'
+```
+
+From Go, `WithRunner` runs `Run`, `Eval`, `Call` and sessions with another
+runtime, given each run as a `Command` (the module, its arguments,
+environment and host directories; `Python.Command` makes one too).
+`go.chrisrx.dev/pywasi/runtime/wasmtime` is one, in-process with
+wasmtime-go (its own module, as it needs cgo; Linux and macOS):
+
+```go
+r, err := wasmtime.New()
+py, err := pywasi.New(ctx, pywasi.WithRunner(r), pywasi.WithPackages("pandas"))
+n, err := py.Eval[int](ctx, `import pandas as pd; int(pd.Series([1, 2]).sum())`)
+```
+
+Its stack is capped at 2 MiB (wasmtime's C API allows no more), enough
+for Python's default recursion limit.
+
 ## Limits
 
 - No threads (WASI preview 1): BLAS runs single-threaded, and
@@ -602,7 +660,10 @@ to main call for one, by their Conventional Commits types
 and `refactor` a patch, and before 1.0 a breaking change is a minor version
 too. `pywasi.Version()` reports the tag, or the commit's short hash between
 tags, and runs get it as `$PYWASI_VERSION`: the REPL shows it after
-CPython's build information, and `pywasi --version` prints it.
+CPython's build information, and `pywasi --version` prints it. Nested
+modules are versioned on their own, by the commits that change them
+(`runtime/wasmtime/v0.1.0`, `.github/workflows/tag-wasmtime.yml`), and the
+root's version ignores those.
 
 `task test:numpy` builds numpy with this repo's patches plus the test-only
 extension modules that published bundles leave out, then runs each test file

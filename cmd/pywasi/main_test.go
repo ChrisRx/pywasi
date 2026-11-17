@@ -1,6 +1,8 @@
 package main
 
 import (
+	"os"
+	"path/filepath"
 	"slices"
 	"testing"
 )
@@ -33,17 +35,51 @@ func TestSplitPython(t *testing.T) {
 // aren't pywasi's.
 func TestFlags(t *testing.T) {
 	cmd := newCommand()
-	if err := cmd.ParseFlags([]string{"-d", "--home", "h", "--mount", "x:/y", "--net=false", "script.py", "--home", "z"}); err != nil {
+	args := bareDeps(cmd.Flags(), []string{"--home", "h", "-d", "pandas,pyarrow==26.0.1", "--mount", "x:/y", "--net=false", "script.py", "--home", "z"})
+	if err := cmd.ParseFlags(args); err != nil {
 		t.Fatal(err)
 	}
 	f := cmd.Flags()
-	if deps, _ := f.GetBool("deps"); !deps {
-		t.Error("-d not set")
+	if deps, _ := f.GetStringSlice("deps"); !slices.Equal(deps, []string{"pandas", "pyarrow==26.0.1"}) {
+		t.Errorf("deps %q", deps)
 	}
 	if home, _ := f.GetString("home"); home != "h" {
 		t.Errorf("home %q", home)
 	}
 	if args := f.Args(); !slices.Equal(args, []string{"script.py", "--home", "z"}) {
 		t.Errorf("args %q", args)
+	}
+}
+
+// -d alone (picking in the terminal) is told from -d with packages.
+func TestBareDeps(t *testing.T) {
+	fs := newCommand().Flags()
+	script := filepath.Join(t.TempDir(), "script.py")
+	if err := os.WriteFile(script, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct{ args, want []string }{
+		{[]string{"-d"}, []string{"--deps="}},
+		{[]string{"--deps", "--net=false"}, []string{"--deps=", "--net=false"}},
+		{[]string{"--home", "x", "-d"}, []string{"--home", "x", "--deps="}},
+		{[]string{"-d", "pandas"}, []string{"-d", "pandas"}},
+		{[]string{"-d", "pandas", "-d"}, []string{"-d", "pandas", "--deps="}},
+		{[]string{"-d", "--", "script.py"}, []string{"--deps=", "--", "script.py"}},
+		{[]string{"script.py", "-d"}, []string{"script.py", "-d"}},
+		{[]string{"-c", "pass", "-d"}, []string{"-c", "pass", "-d"}},
+		// A file or directory after -d is the script, not packages.
+		{[]string{"-d", script}, []string{"--deps=", script}},
+		{[]string{"-d", "pandas", script}, []string{"-d", "pandas", script}},
+	} {
+		if got := bareDeps(fs, tc.args); !slices.Equal(got, tc.want) {
+			t.Errorf("bareDeps(%q) = %q, want %q", tc.args, got, tc.want)
+		}
+	}
+	cmd := newCommand()
+	if err := cmd.ParseFlags(bareDeps(cmd.Flags(), []string{"-d"})); err != nil {
+		t.Fatal(err)
+	}
+	if deps, _ := cmd.Flags().GetStringSlice("deps"); !cmd.Flags().Changed("deps") || len(deps) != 0 {
+		t.Errorf("bare -d: changed %v, deps %q", cmd.Flags().Changed("deps"), deps)
 	}
 }
