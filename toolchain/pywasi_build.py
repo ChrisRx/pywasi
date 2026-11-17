@@ -1042,7 +1042,15 @@ def main():
         if args.project:
             ap.error("give a project or --with/--env, not both")
         project = env_project(args.requirements, args.preload)
-        if args.out is None and not (args.kit or args.bundles) and (project / ".pywasi" / "bin" / "python.wasm").exists():
+        wasm = project / ".pywasi" / "bin" / "python.wasm"
+        # Up to date unless what's compiled into python.wasm changed since.
+        compiled_in = [TOOLCHAIN / "support" / n for n in ("pywasi_main.c", "pywasi_snapshot.py")]
+        if (
+            args.out is None
+            and not (args.kit or args.bundles)
+            and wasm.exists()
+            and all(src.stat().st_mtime <= wasm.stat().st_mtime for src in compiled_in)
+        ):
             log(f"up to date: {project / '.pywasi'}")
             # Pure Python, so refreshing it doesn't need a rebuild.
             for lib in (project / ".pywasi" / "lib").glob("python3.*"):

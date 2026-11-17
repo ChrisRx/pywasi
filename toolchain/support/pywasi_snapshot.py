@@ -138,11 +138,26 @@ def resume(argv, env):
         runpy.run_path(args[0], run_name="__main__")
 
 
+def banner():
+    """The REPL's first line, as CPython's, with the version of pywasi
+    running it ($PYWASI_VERSION). sys.version won't do as is: CPython cuts
+    its compiler part at 80 characters, which wasi-sdk's clang, naming the
+    LLVM repository and commit, runs past, and its build date is the
+    reproducible build's (1980)."""
+    import re
+
+    version = sys.version.split()[0]
+    m = re.search(r"\[Clang ([\w.]+)(-wasi-sdk)?", sys.version)
+    compiler = f" [Clang {m[1]}{', wasi-sdk' if m[2] else ''}]" if m else ""
+    pywasi = os.environ.get("PYWASI_VERSION")
+    return f"Python {version}{compiler} on {sys.platform}" + (f" (pywasi {pywasi})" if pywasi else "")
+
+
 def interact(main):
     """The interactive prompt, as python starts it on a terminal: CPython's
     own REPL (_pyrepl), which falls back to the basic one if it can't use
     the terminal, or the basic one with PYTHON_BASIC_REPL set."""
-    print(f"Python {sys.version} on {sys.platform}", file=sys.stderr)
+    print(banner(), file=sys.stderr)
     print('Type "help", "copyright", "credits" or "license" for more information.', file=sys.stderr)
     if os.environ.get("PYTHON_BASIC_REPL"):
         import code

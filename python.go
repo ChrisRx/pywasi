@@ -381,6 +381,9 @@ func (p *Python) run(ctx context.Context, opts RunOptions) (int, error) {
 		// WASI has no pwd module to look it up in.
 		modCfg = modCfg.WithEnv("HOME", guestTemp)
 	}
+	if _, ok := opts.Env["PYWASI_VERSION"]; !ok {
+		modCfg = modCfg.WithEnv("PYWASI_VERSION", Version())
+	}
 	if opts.Dir != "" {
 		// Read and removed by pywasi_main.c, which changes to it.
 		modCfg = modCfg.WithEnv("PYWASI_CWD", path.Clean(opts.Dir))
