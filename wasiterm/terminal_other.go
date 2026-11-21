@@ -1,6 +1,6 @@
 //go:build !(linux || darwin || windows)
 
-package pywasi
+package wasiterm
 
 import (
 	"errors"

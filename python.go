@@ -28,6 +28,8 @@ import (
 	"github.com/ChrisRx/wazero/sys"
 	"go.chrisrx.dev/x/context"
 
+	"go.chrisrx.dev/pywasi/wasiterm"
+
 	"go.chrisrx.dev/pywasi/builder"
 )
 
@@ -398,7 +400,7 @@ func (p *Python) run(ctx context.Context, opts RunOptions) (int, error) {
 		modCfg = modCfg.WithStderr(opts.Stderr)
 	}
 
-	ctx, restore := withTerminals(ctx, opts.Stdin, opts.Stdout, opts.Stderr)
+	ctx, restore := wasiterm.With(ctx, opts.Stdin, opts.Stdout, opts.Stderr)
 	defer restore()
 	var mod api.Module
 	if p.resumable {

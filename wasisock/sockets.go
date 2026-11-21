@@ -1,4 +1,4 @@
-package pywasi
+package wasisock
 
 import (
 	"context"
@@ -11,7 +11,6 @@ import (
 	"os"
 	"strconv"
 	"strings"
-	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -22,39 +21,42 @@ import (
 	wazerosys "github.com/ChrisRx/wazero/sys"
 )
 
-// Sockets: WASI preview 1 can accept on, read from and write to sockets,
-// but not create them. The interpreter's toolchain/support/pywasi_socket.c
-// implements socket, bind, listen, connect, getaddrinfo and the rest with
-// the host functions here, in the "pywasi" module. A socket is a
-// placeholder descriptor until listen or connect, when it becomes a real
-// listener or connection that wazero's own sock_accept, sock_recv,
-// sock_send and poll_oneoff work on.
+// WASI preview 1 can accept on, read from and write to sockets,
+// but not create them. A guest's socket, bind, listen, connect,
+// getaddrinfo and the rest come from pywasi's C shim,
+// toolchain/support/pywasi_socket.c, which calls the host functions here.
+// A socket is a placeholder descriptor until listen or connect, when it
+// becomes a real listener or connection that wazero's own sock_accept,
+// sock_recv, sock_send and poll_oneoff work on.
 
-// network is the WithNetwork policy.
-type network struct {
-	enabled bool
-	allow   func(op, address string) error
+// Policy says what a guest may do with the network.
+type Policy struct {
+	// Enabled lets a guest use the network at all.
+	Enabled bool
+
+	// Allow, if set, decides each listen and connect, by operation and
+	// address: an error refuses it.
+	Allow func(op, address string) error
+
+	// Disabled, if set, is told when a guest tried to use the network while
+	// Enabled is false, as pywasi notes it to explain the error it gets.
+	Disabled func(ctx context.Context)
 }
 
-func (n network) check(ctx context.Context, op, address string) int32 {
-	if !n.enabled {
-		noteDisabled(ctx)
+func (n Policy) check(ctx context.Context, op, address string) int32 {
+	if !n.Enabled {
+		n.disabled(ctx)
 		return errnoAcces
 	}
-	if n.allow != nil && n.allow(op, address) != nil {
+	if n.Allow != nil && n.Allow(op, address) != nil {
 		return errnoAcces
 	}
 	return 0
 }
 
-// disabledKey marks a run's context with a *atomic.Bool, set when Python
-// tried to use the network while WithNetwork is off. Eval and Call then add
-// a hint to the PermissionError.
-type disabledKey struct{}
-
-func noteDisabled(ctx context.Context) {
-	if b, ok := ctx.Value(disabledKey{}).(*atomic.Bool); ok {
-		b.Store(true)
+func (n Policy) disabled(ctx context.Context) {
+	if n.Disabled != nil {
+		n.Disabled(ctx)
 	}
 }
 
@@ -125,11 +127,11 @@ const (
 // address.
 const wireAddrSize = 28
 
-// instantiateHost adds the "pywasi" host module to r: sockets, and
-// terminals (terminal.go).
-func instantiateHost(ctx context.Context, r wazero.Runtime, n network) error {
-	h := sockets{net: n}
-	b := r.NewHostModuleBuilder("pywasi")
+// Export adds the socket functions to b, the host module the guest's C
+// shim imports them from: "pywasi" unless the shim was built with
+// WASISOCK_MODULE naming another.
+func Export(b wazero.HostModuleBuilder, p Policy) {
+	h := sockets{net: p}
 	for _, f := range []struct {
 		name   string
 		fn     api.GoModuleFunc
@@ -147,9 +149,6 @@ func instantiateHost(ctx context.Context, r wazero.Runtime, n network) error {
 		{"sock_pair", h.pair, 3},
 		{"sock_sendto", h.sendto, 6},
 		{"sock_recvfrom", h.recvfrom, 6},
-		{"term_get", termGet, 1},
-		{"term_set", termSet, 6},
-		{"term_size", termSize, 2},
 	} {
 		params := make([]api.ValueType, f.params)
 		for i := range params {
@@ -157,12 +156,19 @@ func instantiateHost(ctx context.Context, r wazero.Runtime, n network) error {
 		}
 		b.NewFunctionBuilder().WithGoModuleFunction(f.fn, params, []api.ValueType{api.ValueTypeI32}).Export(f.name)
 	}
+}
+
+// Instantiate adds a host module called name to r, with the socket
+// functions alone.
+func Instantiate(ctx context.Context, r wazero.Runtime, name string, p Policy) error {
+	b := r.NewHostModuleBuilder(name)
+	Export(b, p)
 	_, err := b.Instantiate(ctx)
 	return err
 }
 
 type sockets struct {
-	net network
+	net Policy
 }
 
 // pendingSocket is a socket that isn't listening or connected yet.
@@ -264,8 +270,8 @@ func (h sockets) open(ctx context.Context, mod api.Module, stack []uint64) {
 		if kind != 1 && kind != 2 { // TCP or UDP
 			return errnoProtonosupp
 		}
-		if !h.net.enabled {
-			noteDisabled(ctx)
+		if !h.net.Enabled {
+			h.net.disabled(ctx)
 			return errnoAcces
 		}
 		fd, err := sock.Open(mod, &pendingSocket{family: family, dgram: kind == 2, nonblock: nonblock, opts: map[int32]int32{}})
@@ -917,7 +923,7 @@ func (h sockets) lookup(ctx context.Context, mod api.Module, stack []uint64) {
 		switch {
 		case a.IsLoopback():
 			name = "localhost"
-		case a.IsUnspecified() || !h.net.enabled:
+		case a.IsUnspecified() || !h.net.Enabled:
 			return resolveNoname
 		default:
 			if errno := h.net.check(ctx, "resolve", a.String()); errno != 0 {

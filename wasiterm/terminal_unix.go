@@ -1,6 +1,6 @@
 //go:build linux || darwin
 
-package pywasi
+package wasiterm
 
 import (
 	"os"

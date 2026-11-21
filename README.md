@@ -166,7 +166,8 @@ message says to use `WithNetwork`. WASI preview 1 can only
 accept, read and write on sockets, so the interpreter's
 `toolchain/support/pywasi_socket.c` implements `socket`, `bind`, `listen`,
 `connect`, `sendto`, `recvfrom`, `getaddrinfo` and the rest with host
-functions in Go (`sockets.go`), which open real TCP and UDP sockets that
+functions in Go (package [`wasisock`](wasisock), which another program
+built with the shim can use too), which open real TCP and UDP sockets that
 the WASI calls then use. Canceling `Run`'s context stops Python while it waits on a
 socket or sleeps.
 

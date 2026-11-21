@@ -1,6 +1,7 @@
 /* Sockets for wasm32-wasip1: the calls wasi-libc leaves out there (socket,
  * bind, listen, connect, sendto, recvfrom, name resolution, ...),
- * implemented by pywasi's host functions (module "pywasi", see sockets.go).
+ * implemented by pywasi's host functions (module "pywasi", see
+ * wasisock/sockets.go).
  * accept, recv, send, shutdown and poll stay WASI calls, which work on the
  * descriptors these return, TCP and UDP.
  *
@@ -54,11 +55,18 @@ enum { RESOLVE_NUMERICHOST = 1, RESOLVE_PASSIVE = 2, RESOLVE_NUMERICSERV = 4 };
 /* resolve and lookup results, other than 0 and errno values */
 enum { RESOLVE_NONAME = 1000, RESOLVE_AGAIN, RESOLVE_FAIL, RESOLVE_SERVICE, RESOLVE_FAMILY };
 
+/* The host module the functions come from: pywasi's, unless a program
+ * that is not the interpreter builds the shim with its own, which the Go
+ * package go.chrisrx.dev/pywasi/wasisock gives it (wasisock.Instantiate). */
+#ifndef WASISOCK_MODULE
+#define WASISOCK_MODULE "pywasi"
+#endif
+
 #ifdef PYWASI_SOCKET_STUB
 #define HOST(name, params) static int32_t host_##name params { return ENOSYS; }
 #else
 #define HOST(name, params) \
-    __attribute__((import_module("pywasi"), import_name("sock_" #name))) int32_t host_##name params;
+    __attribute__((import_module(WASISOCK_MODULE), import_name("sock_" #name))) int32_t host_##name params;
 #endif
 
 HOST(open, (int32_t family, int32_t type, int32_t nonblock, int32_t *fd))

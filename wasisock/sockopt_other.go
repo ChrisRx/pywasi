@@ -1,6 +1,6 @@
 //go:build !(linux || darwin)
 
-package pywasi
+package wasisock
 
 func getSockopt(uintptr, int32) (int32, int32) { return 0, errnoNoprotoopt }
 

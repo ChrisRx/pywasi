@@ -1,4 +1,4 @@
-package pywasi
+package wasiterm
 
 import (
 	"os"

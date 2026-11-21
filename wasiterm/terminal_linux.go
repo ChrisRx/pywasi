@@ -1,4 +1,4 @@
-package pywasi
+package wasiterm
 
 import "golang.org/x/sys/unix"
 

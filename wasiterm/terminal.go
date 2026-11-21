@@ -1,4 +1,4 @@
-package pywasi
+package wasiterm
 
 import (
 	"context"
@@ -7,13 +7,14 @@ import (
 	"os"
 	"sync"
 
+	"github.com/ChrisRx/wazero"
 	"github.com/ChrisRx/wazero/api"
 	"golang.org/x/term"
 )
 
-// Terminals: WASI has no termios, so the interpreter's
-// toolchain/support/pywasi_term.c implements tcgetattr, tcsetattr and the
-// window size ioctl with the host functions here, in the "pywasi" module.
+// WASI has no termios: pywasi's toolchain/support/pywasi_term.c
+// implements tcgetattr, tcsetattr and the window size ioctl with the host
+// functions here, in the "pywasi" module or the one the shim names.
 // Only the guest's standard descriptors can be terminals: those whose
 // RunOptions Stdin, Stdout or Stderr is an *os.File on a terminal. That is
 // what CPython's REPL (_pyrepl) needs to edit lines itself, with
@@ -31,7 +32,33 @@ const (
 	linuxECHO   = 0o10
 )
 
-const errnoNotty int32 = 59
+// WASI errno values the host functions return.
+const (
+	errnoInval int32 = 28
+	errnoIO    int32 = 29
+	errnoNotty int32 = 59
+)
+
+// Export adds the terminal functions to b, the host module the guest's C
+// shim imports them from: "pywasi" unless the shim was built with
+// WASITERM_MODULE naming another.
+func Export(b wazero.HostModuleBuilder) {
+	for _, f := range []struct {
+		name   string
+		fn     api.GoModuleFunc
+		params int
+	}{
+		{"term_get", termGet, 1},
+		{"term_set", termSet, 6},
+		{"term_size", termSize, 2},
+	} {
+		params := make([]api.ValueType, f.params)
+		for i := range params {
+			params[i] = api.ValueTypeI32
+		}
+		b.NewFunctionBuilder().WithGoModuleFunction(f.fn, params, []api.ValueType{api.ValueTypeI32}).Export(f.name)
+	}
+}
 
 // termMode is what a guest's tcsetattr asks for.
 type termMode struct {
@@ -62,9 +89,10 @@ type terminals struct {
 
 type terminalsKey struct{}
 
-// withTerminals adds the terminals among stdin, stdout and stderr to ctx
-// for the host functions. restore puts back the states the guest changed.
-func withTerminals(ctx context.Context, stdin io.Reader, stdout, stderr io.Writer) (_ context.Context, restore func()) {
+// With adds the terminals among stdin, stdout and stderr to ctx for the
+// host functions: a guest run with that context can use them. restore puts
+// back the states the guest changed.
+func With(ctx context.Context, stdin io.Reader, stdout, stderr io.Writer) (_ context.Context, restore func()) {
 	t := &terminals{saved: map[uintptr]termState{}}
 	found := false
 	for i, s := range []any{stdin, stdout, stderr} {

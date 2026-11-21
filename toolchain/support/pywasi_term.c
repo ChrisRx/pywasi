@@ -1,6 +1,6 @@
 /* Terminals for wasm32-wasip1: the <termios.h> calls (termios/termios.h)
  * that wasi-libc leaves out, implemented by pywasi's host functions
- * (module "pywasi", see terminal.go), and CPython's termios module, built
+ * (module "pywasi", see wasiterm/terminal.go), and CPython's termios module, built
  * from its own Modules/termios.c and registered here.
  *
  * Only the standard descriptors can be terminals, the ones the host gave
@@ -16,8 +16,17 @@
 
 #include "termios.h"
 
+/* The host module the functions come from: pywasi's, unless a program
+ * that is not the interpreter builds this with its own, which the Go
+ * package go.chrisrx.dev/pywasi/wasiterm gives it (wasiterm.Export). Such
+ * a program also leaves out CPython's termios module, with
+ * -DWASITERM_NO_PYTHON. */
+#ifndef WASITERM_MODULE
+#define WASITERM_MODULE "pywasi"
+#endif
+
 #define HOST(name, params) \
-    __attribute__((import_module("pywasi"), import_name("term_" #name))) int32_t host_##name params;
+    __attribute__((import_module(WASITERM_MODULE), import_name("term_" #name))) int32_t host_##name params;
 
 /* 0 if fd is a host terminal, else an errno (ENOTTY). */
 HOST(get, (int32_t fd))
@@ -147,6 +156,7 @@ int pywasi_term_ioctl(int fd, int request, ...) {
     return 0;
 }
 
+#ifndef WASITERM_NO_PYTHON
 /* CPython's termios module, compiled with this file's header. */
 extern void *PyInit_termios(void);
 extern void pywasi_register(const char *name, void *(*init)(void));
@@ -154,3 +164,4 @@ extern void pywasi_register(const char *name, void *(*init)(void));
 __attribute__((constructor)) static void pywasi_register_termios(void) {
     pywasi_register("termios", PyInit_termios);
 }
+#endif
